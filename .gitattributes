@@ -1,0 +1,5 @@
+# The VBA editor's File > Import needs Windows (CRLF) line endings,
+# so keep these files byte-for-byte as committed.
+OutlookVBA/*.bas -text
+OutlookVBA/*.cls -text
+OutlookVBA/*.vba -text
