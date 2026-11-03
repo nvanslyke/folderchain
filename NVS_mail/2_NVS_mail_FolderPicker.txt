@@ -1,5 +1,5 @@
 '==============================================================================
-' NVS_mail - file 6 of 7:  NVS_mail_FolderPicker   (UserForm)
+' NVS_mail - file 2 of 3:  NVS_mail_FolderPicker   (UserForm)
 '
 ' HOW TO ADD: in the VBA editor (Alt+F11) choose Insert > UserForm. Press F4
 ' and change (Name) to  NVS_mail_FolderPicker  . Right-click the form > View Code,

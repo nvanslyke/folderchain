@@ -1,0 +1,1552 @@
+'==============================================================================
+' NVS_mail - file 1 of 3:  NVS_mail   (standard module)
+'
+' HOW TO ADD: in the VBA editor (Alt+F11) choose Insert > Module. Press F4
+' and change (Name) to  NVS_mail  . Delete anything already in the code
+' window (such as "Option Explicit"), then paste this whole file.
+'
+' Buttons - add these macros to the ribbon (see README.md):
+'   NVS_FileToChainFolder         one click: move email(s) to the chain's folder
+'   NVS_MoveToFolder              folder picker that starts on the chain's folder
+'   NVS_SaveEmailAndAttachments   save the email (.msg) and all its attachments
+'   NVS_RenameAttachments         rename attachments on the draft you're writing
+'   NVS_ScheduleMeetingWithChain  new meeting invite with everyone on the chain
+'   NVS_SetFolderColor            choose a color for a folder
+' Extras (ribbon, or run with Alt+F8):
+'   NVS_RemoveFolderColor  NVS_ListFolderColors  NVS_RecolorSelected
+'   NVS_RecolorInbox       NVS_ApplyRowColorsToView
+'
+' The settings you can change are just below.
+'==============================================================================
+Option Explicit
+
+'------------------------------------------------------------------------------
+' SETTINGS - change these to taste
+'------------------------------------------------------------------------------
+
+' Prefix for the categories NVS_mail creates (one per colored folder).
+Private Const NVS_CATEGORY_PREFIX As String = "Folder: "
+
+' Folder names (semicolon separated, not case sensitive) that never count as
+' "the folder a chain is filed in". Inbox, Sent Items, Deleted Items (and its
+' subfolders), Drafts, Outbox, Junk, RSS Feeds and the Sync Issues folders are
+' always excluded, whatever language Outlook is in.
+Private Const NVS_EXCLUDED_FOLDER_NAMES As String = "Archive;Conversation History;Snoozed;Scheduled"
+
+' True = color mail automatically when it arrives, is sent, or is filed.
+Private Const NVS_AUTO_COLOR As Boolean = True
+
+' How many days back "Recolor Inbox" and "color existing mail" look.
+Private Const NVS_RECOLOR_DAYS_BACK As Long = 180
+
+' Save Email + Attachments: skip pictures embedded in the body (signature
+' logos and so on) and only save real attachments.
+Private Const NVS_SKIP_INLINE_IMAGES As Boolean = True
+
+' Save Email + Attachments: 0 = save straight into the chosen folder,
+' 1 = one subfolder per email when several emails are selected, 2 = always.
+Private Const NVS_SUBFOLDER_MODE As Long = 1
+
+' Schedule Meeting: text put in front of the chain's subject, e.g. "Meeting: ".
+Private Const NVS_MEETING_SUBJECT_PREFIX As String = ""
+
+' Schedule Meeting: True = people who were only ever on CC become optional.
+Private Const NVS_CC_AS_OPTIONAL As Boolean = True
+
+'------------------------------------------------------------------------------
+' Internals
+'------------------------------------------------------------------------------
+Private Const NVS_APP As String = "NVS_mail"
+Private Const NVS_RULE_PREFIX As String = "NVS_mail: "
+Private Const PR_SMTP_ADDRESS As String = "http://schemas.microsoft.com/mapi/proptag/0x39FE001E"
+Private Const PR_ATTACH_CONTENT_ID As String = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
+Private Const PR_ATTACHMENT_HIDDEN As String = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B"
+Private Const PR_ATTR_HIDDEN As String = "http://schemas.microsoft.com/mapi/proptag/0x10F4000B"
+
+Private Const SEC_FOLDERS As String = "FolderCategory"
+
+' True while NVS_mail itself is moving mail, so the move events in
+' ThisOutlookSession don't repeat the work.
+Private gNVS_Busy As Boolean
+
+Private mExcluded As Object        ' folder EntryID -> True
+Private mStoreDeleted As Object    ' StoreID -> Deleted Items folder path
+Private mMappedCats As Object      ' category name -> True (Nothing = reload)
+
+' Folder list used by NVS_mail_FolderPicker (cached between uses).
+Public gNVS_FolderCount As Long
+Public gNVS_FolderID() As String
+Private gNVS_FolderStoreID() As String
+Public gNVS_FolderLabel() As String     ' indented name for the tree view
+Public gNVS_FolderPath() As String      ' "Inbox\Projects\Acme" for filtering
+Private mCacheKey As String
+
+
+'##############################################################################
+'  BUTTONS
+'##############################################################################
+
+'==============================================================================
+' Filing
+'==============================================================================
+
+' Moves each selected email into the folder the rest of its chain is filed
+' in. Emails whose chain isn't filed anywhere yet get a folder picker.
+Public Sub NVS_FileToChainFolder()
+    Dim items As Collection, n As Long, i As Long
+    Set items = NVS_GetSelectedItems()
+    n = items.Count
+    If n = 0 Then
+        MsgBox "Select one or more emails first.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    ' Work out every target before moving anything.
+    Dim targets() As Outlook.Folder, cache As Object, cid As String, it As Object
+    ReDim targets(1 To n)
+    Set cache = CreateObject("Scripting.Dictionary")
+    For i = 1 To n
+        Set it = items(i)
+        cid = ""
+        On Error Resume Next
+        cid = it.ConversationID
+        On Error GoTo 0
+        If cid <> "" And cache.Exists(cid) Then
+            If IsObject(cache(cid)) Then Set targets(i) = cache(cid)
+        Else
+            Set targets(i) = NVS_FindChainFolder(it, True)
+            If cid <> "" Then
+                If targets(i) Is Nothing Then cache.Add cid, Empty Else cache.Add cid, targets(i)
+            End If
+        End If
+    Next
+
+    Dim moved As New Collection, orphans As New Collection, already As Long
+    Dim lastTarget As Outlook.Folder, m As Object
+
+    gNVS_Busy = True
+    For i = 1 To n
+        If targets(i) Is Nothing Then
+            orphans.Add items(i)
+        ElseIf NVS_SameFolder(items(i).Parent, targets(i)) Then
+            already = already + 1
+        Else
+            Set m = Nothing
+            On Error Resume Next
+            Set m = items(i).Move(targets(i))
+            On Error GoTo 0
+            If Not m Is Nothing Then
+                moved.Add m
+                Set lastTarget = targets(i)
+            End If
+        End If
+    Next
+    gNVS_Busy = False
+
+    If orphans.Count > 0 Then
+        Dim pick As Outlook.Folder, def As Outlook.Folder
+        Set def = NVS_GetLastMoveFolder()
+        If def Is Nothing Then Set def = Application.ActiveExplorer.CurrentFolder
+        Set pick = NVS_PickFolder("File to folder", _
+            IIf(orphans.Count = 1, "This email's chain", orphans.Count & " of these chains") & _
+            " isn't filed in a folder yet. Choose where to file it:", def, "Move here")
+        If Not pick Is Nothing Then
+            MoveAll orphans, pick, moved
+            Set lastTarget = pick
+        End If
+    End If
+
+    If Not lastTarget Is Nothing Then NVS_SetLastMoveFolder lastTarget
+    RecolorMoved moved
+
+    If moved.Count = 0 And already > 0 And orphans.Count = 0 Then
+        MsgBox IIf(already = 1, "This email is", "These emails are") & _
+               " already in the chain's folder.", vbInformation, NVS_APP
+    End If
+End Sub
+
+' Folder picker for moving email that starts on the folder the chain is
+' filed in (instead of the last folder you used).
+Public Sub NVS_MoveToFolder()
+    Dim items As Collection, def As Outlook.Folder, info As String, target As Outlook.Folder
+    Set items = NVS_GetSelectedItems()
+    If items.Count = 0 Then
+        MsgBox "Select one or more emails first.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    Set def = NVS_FindChainFolder(items(1), True)
+    If def Is Nothing Then
+        info = "This chain isn't filed anywhere yet, so your last-used folder is selected."
+        Set def = NVS_GetLastMoveFolder()
+        If def Is Nothing Then Set def = Application.ActiveExplorer.CurrentFolder
+    Else
+        info = "Selected: the folder this chain is filed in. Press Enter to move there, or type to find another folder."
+    End If
+
+    Set target = NVS_PickFolder("Move " & items.Count & IIf(items.Count = 1, " email", " emails") & " to folder", _
+                               info, def, "Move here")
+    If target Is Nothing Then Exit Sub
+
+    Dim moved As New Collection
+    gNVS_Busy = True
+    MoveAll items, target, moved
+    gNVS_Busy = False
+    NVS_SetLastMoveFolder target
+    RecolorMoved moved
+End Sub
+
+Private Sub MoveAll(ByVal items As Collection, ByVal target As Outlook.Folder, ByVal moved As Collection)
+    Dim it As Object, m As Object
+    For Each it In items
+        If Not NVS_SameFolder(it.Parent, target) Then
+            Set m = Nothing
+            On Error Resume Next
+            Set m = it.Move(target)
+            On Error GoTo 0
+            If Not m Is Nothing Then moved.Add m
+        End If
+    Next
+End Sub
+
+Private Sub RecolorMoved(ByVal moved As Collection)
+    If Not NVS_AUTO_COLOR Then Exit Sub
+    Dim it As Object, seen As Object, cid As String
+    Set seen = CreateObject("Scripting.Dictionary")
+    For Each it In moved
+        cid = ""
+        On Error Resume Next
+        cid = it.ConversationID
+        On Error GoTo 0
+        If cid = "" Then
+            NVS_RecolorConversation it
+        ElseIf Not seen.Exists(cid) Then
+            seen.Add cid, True
+            NVS_RecolorConversation it
+        End If
+    Next
+End Sub
+
+'==============================================================================
+' Colors
+'==============================================================================
+
+Public Sub NVS_SetFolderColor()
+    Dim f As Outlook.Folder, oldCat As String, catName As String, col As Long, n As Long
+
+    Set f = NVS_PickFolder("Set folder color", _
+        "Choose the folder whose email chains should be color coded:", _
+        Application.ActiveExplorer.CurrentFolder, "Next")
+    If f Is Nothing Then Exit Sub
+
+    If Not NVS_IsFilingFolder(f) Then
+        MsgBox "'" & f.Name & "' is a system folder (Inbox, Sent Items, Archive, ...)." & vbCrLf & _
+               "Colors follow the folder a chain is filed in, so pick the folder you file mail into.", _
+               vbExclamation, NVS_APP
+        Exit Sub
+    End If
+
+    oldCat = NVS_GetFolderCategory(f)
+    col = NVS_AskColor(f.Name, NVS_CategoryColor(oldCat))
+    If col < 0 Then Exit Sub
+
+    catName = oldCat
+    If catName = "" Then catName = NVS_CATEGORY_PREFIX & f.Name
+    catName = InputBox("Name of the category that shows this color:", NVS_APP & " - category name", catName)
+    If StrPtr(catName) = 0 Then Exit Sub
+    catName = Trim$(Replace(Replace(catName, ",", " "), ";", " "))
+    If catName = "" Then Exit Sub
+
+    NVS_EnsureCategory catName, col
+    NVS_SaveFolderCategory f, catName
+
+    If MsgBox("'" & f.Name & "' is now " & NVS_ColorName(col) & "." & vbCrLf & vbCrLf & _
+              "New and filed email in its chains will be colored from now on." & vbCrLf & vbCrLf & _
+              "Color the email chains already in this folder too (last " & NVS_RECOLOR_DAYS_BACK & _
+              " days)? Their emails in your Inbox and Sent Items are included. " & _
+              "This can take a minute for big folders.", vbYesNo + vbQuestion, NVS_APP) = vbYes Then
+        n = NVS_RecolorFolder(f, NVS_RECOLOR_DAYS_BACK, IIf(oldCat <> catName, oldCat, ""))
+        MsgBox "Done: " & n & " chain(s) colored.", vbInformation, NVS_APP
+    End If
+End Sub
+
+Public Sub NVS_RemoveFolderColor()
+    Dim f As Outlook.Folder, catName As String, n As Long
+    Set f = NVS_PickFolder("Remove folder color", "Choose the folder to stop color coding:", _
+                          Application.ActiveExplorer.CurrentFolder, "Remove")
+    If f Is Nothing Then Exit Sub
+
+    catName = NVS_GetFolderCategory(f)
+    If catName = "" Then
+        MsgBox "'" & f.Name & "' doesn't have a color.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    NVS_ClearFolderCategory f
+
+    If MsgBox("'" & f.Name & "' will no longer be colored." & vbCrLf & vbCrLf & _
+              "Also take the '" & catName & "' color off the email chains in it now (last " & _
+              NVS_RECOLOR_DAYS_BACK & " days)?", vbYesNo + vbQuestion, NVS_APP) = vbYes Then
+        NVS_RecolorFolder f, NVS_RECOLOR_DAYS_BACK, catName
+        MsgBox "Done.", vbInformation, NVS_APP
+    End If
+End Sub
+
+Public Sub NVS_ListFolderColors()
+    Dim s As Variant, i As Long, f As Outlook.Folder, msg As String, nm As String
+    s = NVS_GetMappings()
+    If Not IsArray(s) Then
+        MsgBox "No folders have a color yet. Use 'Set Folder Color' to add one.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    For i = LBound(s, 1) To UBound(s, 1)
+        Set f = Nothing
+        On Error Resume Next
+        Set f = Application.Session.GetFolderFromID(CStr(s(i, 0)))
+        On Error GoTo 0
+        If f Is Nothing Then nm = "(folder not found)" Else nm = Mid$(f.FolderPath, 3)
+        msg = msg & NVS_ColorName(NVS_CategoryColor(CStr(s(i, 1)))) & "  -  " & nm & _
+              "   [" & s(i, 1) & "]" & vbCrLf
+    Next
+    MsgBox msg, vbInformation, NVS_APP & " - folder colors"
+End Sub
+
+Public Sub NVS_RecolorSelected()
+    Dim items As Collection, it As Object, n As Long, colored As Long
+    Set items = NVS_GetSelectedItems()
+    If items.Count = 0 Then
+        MsgBox "Select one or more emails first.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+    For Each it In items
+        If NVS_RecolorConversation(it, True) Then colored = colored + 1
+    Next
+    If colored = 0 Then
+        MsgBox "No color applied: the chain isn't filed in a folder that has a color.", vbInformation, NVS_APP
+    End If
+End Sub
+
+Public Sub NVS_RecolorInbox()
+    Dim n As Long
+    If MsgBox("Check the colors of every chain in your Inbox from the last " & NVS_RECOLOR_DAYS_BACK & _
+              " days? This can take a minute.", vbOKCancel + vbQuestion, NVS_APP) <> vbOK Then Exit Sub
+    n = NVS_RecolorFolder(Application.Session.GetDefaultFolder(olFolderInbox), NVS_RECOLOR_DAYS_BACK)
+    MsgBox "Done: " & n & " chain(s) colored.", vbInformation, NVS_APP
+End Sub
+
+' Categories show as a colored tag. This adds Conditional Formatting rules to
+' the current view so the whole row's text takes the folder's color too.
+' Run it once in each folder view you want (e.g. Inbox), and again after
+' adding colors. Outlook only has 16 text colors, so it picks the closest.
+Public Sub NVS_ApplyRowColorsToView()
+    Dim v As Outlook.View, tv As Outlook.TableView, rules As Outlook.AutoFormatRules
+    Dim r As Outlook.AutoFormatRule, s As Variant, i As Long, catName As String
+    Dim done As Object, added As Long
+
+    On Error GoTo Fail
+    Set v = Application.ActiveExplorer.CurrentView
+    If v.ViewType <> olTableView Then
+        MsgBox "Switch this folder to a list view (View > Change View > Compact or Single) first.", _
+               vbExclamation, NVS_APP
+        Exit Sub
+    End If
+    Set tv = v
+    Set rules = tv.AutoFormatRules
+
+    For i = rules.Count To 1 Step -1
+        If Left$(rules.Item(i).Name, Len(NVS_RULE_PREFIX)) = NVS_RULE_PREFIX Then rules.Remove i
+    Next
+
+    s = NVS_GetMappings()
+    Set done = CreateObject("Scripting.Dictionary")
+    done.CompareMode = vbTextCompare
+    If IsArray(s) Then
+        For i = LBound(s, 1) To UBound(s, 1)
+            catName = CStr(s(i, 1))
+            If catName <> "" And Not done.Exists(catName) Then
+                done.Add catName, True
+                Set r = rules.Add(NVS_RULE_PREFIX & catName)
+                r.Filter = """urn:schemas-microsoft-com:office:office#Keywords"" LIKE '%" & _
+                           Replace(catName, "'", "''") & "%'"
+                r.Font.Color = TextColorFor(NVS_CategoryColor(catName))
+                r.Enabled = True
+                added = added + 1
+            End If
+        Next
+    End If
+
+    rules.Save
+    tv.Save
+    tv.Apply
+    MsgBox added & " row color rule(s) set on this view." & vbCrLf & _
+           "To change their order or look: View > View Settings > Conditional Formatting.", _
+           vbInformation, NVS_APP
+    Exit Sub
+Fail:
+    MsgBox "Couldn't change this view: " & Err.Description, vbExclamation, NVS_APP
+End Sub
+
+' Closest of Outlook's 16 text colors (OlColor) to a category color.
+Private Function TextColorFor(ByVal catColor As Long) As Long
+    Dim map As Variant
+    '            0  1   2  3   4  5  6  7  8   9  10 11 12 13 14 15 16 17 18  19 20 21 22 23 24 25
+    map = Array(0, 10, 2, 14, 4, 3, 7, 4, 13, 6, 2, 8, 8, 8, 8, 1, 2, 2, 14, 4, 3, 7, 4, 5, 6, 2)
+    If catColor >= 0 And catColor <= UBound(map) Then TextColorFor = map(catColor)
+End Function
+
+'==============================================================================
+' Save email + attachments
+'==============================================================================
+
+Public Sub NVS_SaveEmailAndAttachments()
+    Dim items As Collection, root As String, useSub As Boolean
+    Set items = NVS_GetSelectedItems()
+    If items.Count = 0 Then
+        MsgBox "Select or open an email first.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    root = ChooseSaveFolder()
+    If root = "" Then Exit Sub
+    useSub = (NVS_SUBFOLDER_MODE = 2) Or (NVS_SUBFOLDER_MODE = 1 And items.Count > 1)
+
+    Dim fso As Object, it As Object, dest As String, baseName As String
+    Dim nMsg As Long, nAtt As Long, errs As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    For Each it In items
+        baseName = EmailBaseName(it)
+        dest = root
+        If useSub Then
+            dest = NVS_UniquePath(root, baseName, "")
+            On Error Resume Next
+            fso.CreateFolder dest
+            On Error GoTo 0
+            If Not fso.FolderExists(dest) Then dest = root
+        End If
+
+        On Error Resume Next
+        Err.Clear
+        it.SaveAs NVS_UniquePath(dest, baseName, ".msg"), olMSGUnicode
+        If Err.Number = 0 Then
+            nMsg = nMsg + 1
+        Else
+            errs = errs & "Email '" & baseName & "': " & Err.Description & vbCrLf
+        End If
+        On Error GoTo 0
+
+        nAtt = nAtt + SaveAttachments(it, dest, errs)
+    Next
+
+    Dim msg As String
+    msg = "Saved " & nMsg & IIf(nMsg = 1, " email", " emails") & " and " & nAtt & _
+          IIf(nAtt = 1, " attachment", " attachments") & " to:" & vbCrLf & root
+    If errs <> "" Then msg = msg & vbCrLf & vbCrLf & "Problems:" & vbCrLf & errs
+    If MsgBox(msg & vbCrLf & vbCrLf & "Open the folder?", vbYesNo + _
+              IIf(errs = "", vbInformation, vbExclamation), NVS_APP) = vbYes Then
+        Shell "explorer.exe """ & root & """", vbNormalFocus
+    End If
+End Sub
+
+Private Function SaveAttachments(ByVal it As Object, ByVal dest As String, ByRef errs As String) As Long
+    Dim html As String, i As Long, att As Outlook.Attachment, fn As String
+    Dim b As String, ext As String, n As Long
+
+    On Error Resume Next
+    html = it.HTMLBody
+    On Error GoTo 0
+
+    For i = 1 To it.Attachments.Count
+        Set att = it.Attachments.Item(i)
+        If NVS_SKIP_INLINE_IMAGES And NVS_IsInlineAttachment(att, html) Then GoTo NextAtt
+
+        fn = ""
+        On Error Resume Next
+        fn = att.FileName
+        If fn = "" Then fn = att.DisplayName & IIf(att.Type = olEmbeddeditem, ".msg", "")
+        On Error GoTo 0
+        fn = NVS_SafeFileName(fn, 200)
+        If fn = "" Then fn = "attachment " & i
+        NVS_SplitExt fn, b, ext
+
+        On Error Resume Next
+        Err.Clear
+        att.SaveAsFile NVS_UniquePath(dest, b, ext)
+        If Err.Number = 0 Then
+            n = n + 1
+        Else
+            errs = errs & "Attachment '" & fn & "': " & Err.Description & vbCrLf
+        End If
+        On Error GoTo 0
+NextAtt:
+    Next
+    SaveAttachments = n
+End Function
+
+' "2026-11-03 0915 - Subject"
+Private Function EmailBaseName(ByVal it As Object) As String
+    Dim subj As String
+    On Error Resume Next
+    subj = it.Subject
+    On Error GoTo 0
+    If Trim$(subj) = "" Then subj = "(no subject)"
+    EmailBaseName = Format$(NVS_ItemTime(it), "yyyy-mm-dd hhnn") & " - " & NVS_SafeFileName(subj, 80)
+End Function
+
+' Offers the last folder used; otherwise shows Windows' folder browser.
+Private Function ChooseSaveFolder() As String
+    Dim fso As Object, last As String, ans As VbMsgBoxResult
+    Dim sh As Object, fld As Object, p As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    last = GetSetting(NVS_APP, "Save", "LastFolder", "")
+    If last <> "" Then
+        If fso.FolderExists(last) Then
+            ans = MsgBox("Save to this folder?" & vbCrLf & vbCrLf & last & vbCrLf & vbCrLf & _
+                         "Yes = save here" & vbCrLf & "No = choose a different folder", _
+                         vbYesNoCancel + vbQuestion, NVS_APP & " - save email + attachments")
+            If ans = vbCancel Then Exit Function
+            If ans = vbYes Then ChooseSaveFolder = last: Exit Function
+        End If
+    End If
+
+    Set sh = CreateObject("Shell.Application")
+    ' &H51 = only file system folders + "make new folder" button + path box
+    Set fld = sh.BrowseForFolder(0, "Where should the email and its attachments be saved?", &H51)
+    If fld Is Nothing Then Exit Function
+
+    On Error Resume Next
+    p = fld.Self.Path
+    On Error GoTo 0
+    If p = "" Or Not fso.FolderExists(p) Then
+        MsgBox "Please choose a normal folder on your computer or network drive.", vbExclamation, NVS_APP
+        Exit Function
+    End If
+
+    SaveSetting NVS_APP, "Save", "LastFolder", p
+    ChooseSaveFolder = p
+End Function
+
+'==============================================================================
+' Rename attachments on a draft
+'==============================================================================
+
+Public Sub NVS_RenameAttachments()
+    Dim m As Outlook.MailItem, html As String, i As Long, n As Long
+    Dim idx() As Long, lst As String, s As String, pick As Long
+    Dim att As Outlook.Attachment, oldName As String, newName As String
+
+    Set m = CurrentDraft()
+    If m Is Nothing Then
+        MsgBox "Open the email you're writing (or start a reply) first." & vbCrLf & _
+               "Attachments can only be renamed on emails that haven't been sent.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    Do
+        On Error Resume Next
+        html = ""
+        html = m.HTMLBody
+        On Error GoTo 0
+
+        ' List the real file attachments (not pictures in the body).
+        n = 0
+        lst = ""
+        ReDim idx(1 To m.Attachments.Count + 1)
+        For i = 1 To m.Attachments.Count
+            Set att = m.Attachments.Item(i)
+            If att.Type = olByValue And Not NVS_IsInlineAttachment(att, html) Then
+                n = n + 1
+                idx(n) = i
+                lst = lst & n & ".   " & att.FileName & vbCrLf
+            End If
+        Next
+        If n = 0 Then
+            MsgBox "This email has no file attachments to rename." & vbCrLf & _
+                   "(Cloud/OneDrive links and pictures in the body can't be renamed.)", vbInformation, NVS_APP
+            Exit Sub
+        End If
+
+        If n = 1 Then
+            pick = 1
+        Else
+            s = InputBox("Attachments:" & vbCrLf & vbCrLf & lst & vbCrLf & _
+                         "Type the number of the one to rename (Cancel when done):", _
+                         NVS_APP & " - rename attachment", "1")
+            If StrPtr(s) = 0 Then Exit Sub
+            s = Trim$(s)
+            If s = "" Then Exit Sub
+            If Not IsNumeric(s) Then GoTo NextRound
+            pick = CLng(s)
+            If pick < 1 Or pick > n Then GoTo NextRound
+        End If
+
+        Set att = m.Attachments.Item(idx(pick))
+        oldName = att.FileName
+        newName = InputBox("New name for:" & vbCrLf & oldName & vbCrLf & vbCrLf & _
+                           "(The extension, e.g. .pdf, is kept automatically.)", _
+                           NVS_APP & " - rename attachment", oldName)
+        If StrPtr(newName) = 0 Then
+            If n = 1 Then Exit Sub
+            GoTo NextRound
+        End If
+
+        newName = CleanNewName(newName, oldName)
+        If newName <> "" And newName <> oldName Then
+            If Not ReplaceAttachment(m, att, newName) Then Exit Sub
+        End If
+        If n = 1 Then Exit Sub
+NextRound:
+    Loop
+End Sub
+
+' The unsent email in the active window, the inline reply in the reading
+' pane, or a single selected draft.
+Private Function CurrentDraft() As Outlook.MailItem
+    Dim obj As Object
+    On Error Resume Next
+    If TypeName(Application.ActiveWindow) = "Inspector" Then
+        Set obj = Application.ActiveInspector.CurrentItem
+    Else
+        Set obj = Application.ActiveExplorer.ActiveInlineResponse
+        If obj Is Nothing Then
+            If Application.ActiveExplorer.Selection.Count = 1 Then
+                Set obj = Application.ActiveExplorer.Selection.Item(1)
+            End If
+        End If
+    End If
+    On Error GoTo 0
+
+    If obj Is Nothing Then Exit Function
+    If Not TypeOf obj Is Outlook.MailItem Then Exit Function
+    If obj.Sent Then Exit Function
+    Set CurrentDraft = obj
+End Function
+
+' Removes characters Windows can't use and keeps the old extension when the
+' user didn't type one.
+Private Function CleanNewName(ByVal newName As String, ByVal oldName As String) As String
+    Dim ob As String, oe As String, nb As String, ne As String
+    newName = NVS_SafeFileName(newName, 200)
+    If newName = "" Then Exit Function
+    NVS_SplitExt oldName, ob, oe
+    NVS_SplitExt newName, nb, ne
+    ' Keep the original extension so the file still opens: "Invoice 3.2"
+    ' for "scan.pdf" becomes "Invoice 3.2.pdf".
+    If oe <> "" And LCase$(ne) <> LCase$(oe) Then newName = newName & oe
+    CleanNewName = newName
+End Function
+
+' Outlook can't rename an attachment in place, so save it under the new name
+' and attach that copy instead of the original.
+Private Function ReplaceAttachment(ByVal m As Outlook.MailItem, ByVal att As Outlook.Attachment, _
+                                   ByVal newName As String) As Boolean
+    Dim fso As Object, tmpDir As String, tmpPath As String, newAtt As Outlook.Attachment
+
+    On Error GoTo Fail
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    tmpDir = Environ$("TEMP") & "\NVS_mail_" & Format$(Now, "yyyymmddhhnnss") & "_" & CLng(Timer * 100)
+    fso.CreateFolder tmpDir
+    tmpPath = tmpDir & "\" & newName
+
+    att.SaveAsFile tmpPath
+    Set newAtt = m.Attachments.Add(tmpPath, olByValue, , newName)
+    att.Delete
+    ReplaceAttachment = True
+
+Cleanup:
+    On Error Resume Next
+    If tmpPath <> "" Then fso.DeleteFile tmpPath, True
+    If tmpDir <> "" Then fso.DeleteFolder tmpDir, True
+    Exit Function
+Fail:
+    MsgBox "Couldn't rename the attachment: " & Err.Description, vbExclamation, NVS_APP
+    Resume Cleanup
+End Function
+
+'==============================================================================
+' Schedule a meeting with everyone on the chain
+'==============================================================================
+
+' Opens a brand-new meeting invite (not "Reply with Meeting", so it doesn't
+' land in the chain) with everyone who sent or received any email in the
+' selected chain(s). You can edit everything before sending.
+Public Sub NVS_ScheduleMeetingWithChain()
+    Dim items As Collection, sel As Object, it As Object
+    Dim people As Object, mine As Object, seenConv As Object, cid As String
+
+    Set items = NVS_GetSelectedItems()
+    If items.Count = 0 Then
+        MsgBox "Select or open an email in the chain first.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    Set people = CreateObject("Scripting.Dictionary")
+    people.CompareMode = vbTextCompare
+    Set seenConv = CreateObject("Scripting.Dictionary")
+    Set mine = NVS_MyAddresses()
+
+    For Each sel In items
+        cid = ""
+        On Error Resume Next
+        cid = sel.ConversationID
+        On Error GoTo 0
+        If cid = "" Or Not seenConv.Exists(cid) Then
+            If cid <> "" Then seenConv.Add cid, True
+            For Each it In NVS_ConversationItems(sel)
+                CollectPeople it, people, mine
+            Next
+        End If
+    Next
+
+    If people.Count = 0 Then
+        MsgBox "Couldn't find anyone else on this chain.", vbInformation, NVS_APP
+        Exit Sub
+    End If
+
+    Dim topic As String
+    On Error Resume Next
+    topic = items(1).ConversationTopic
+    If topic = "" Then topic = items(1).Subject
+    On Error GoTo 0
+
+    Dim appt As Outlook.AppointmentItem, k As Variant, r As Outlook.Recipient
+    Set appt = Application.CreateItem(olAppointmentItem)
+    appt.MeetingStatus = olMeeting
+    appt.Subject = NVS_MEETING_SUBJECT_PREFIX & topic
+    For Each k In people.Keys
+        Set r = appt.Recipients.Add(CStr(k))
+        r.Type = people(k)
+    Next
+    appt.Recipients.ResolveAll
+    appt.Display
+End Sub
+
+Private Sub CollectPeople(ByVal it As Object, ByVal people As Object, ByVal mine As Object)
+    Dim i As Long, r As Outlook.Recipient, kind As Long
+    If Not NVS_IsMailLike(it) Then Exit Sub
+
+    AddPerson people, mine, NVS_SenderSmtp(it), olRequired
+
+    On Error Resume Next
+    For i = 1 To it.Recipients.Count
+        Set r = Nothing
+        Set r = it.Recipients.Item(i)
+        If Not r Is Nothing Then
+            kind = r.Type
+            If kind = olTo Then
+                AddPerson people, mine, NVS_RecipientSmtp(r), olRequired
+            ElseIf kind = olCC Then
+                AddPerson people, mine, NVS_RecipientSmtp(r), IIf(NVS_CC_AS_OPTIONAL, olOptional, olRequired)
+            End If
+            ' BCC is skipped on purpose.
+        End If
+    Next
+End Sub
+
+Private Sub AddPerson(ByVal people As Object, ByVal mine As Object, ByVal addr As String, ByVal kind As Long)
+    addr = Trim$(addr)
+    If addr = "" Then Exit Sub
+    If mine.Exists(addr) Then Exit Sub
+    If people.Exists(addr) Then
+        If kind = olRequired Then people(addr) = olRequired
+    Else
+        people.Add addr, kind
+    End If
+End Sub
+
+
+'##############################################################################
+'  HELPERS - nothing below here needs changing
+'##############################################################################
+
+'==============================================================================
+' Events - called from ThisOutlookSession
+'==============================================================================
+
+' New mail arrived in the Inbox: color it like the rest of its chain.
+Public Sub NVS_OnNewMail(ByVal entryIDs As String)
+    On Error Resume Next
+    If Not NVS_AUTO_COLOR Then Exit Sub
+    If MappedCategories().Count = 0 Then Exit Sub
+
+    Dim ids() As String, i As Long, it As Object
+    ids = Split(entryIDs, ",")
+    For i = LBound(ids) To UBound(ids)
+        Set it = Nothing
+        Set it = Application.Session.GetItemFromID(Trim$(ids(i)))
+        If Not it Is Nothing Then
+            If TypeOf it Is Outlook.MailItem Then NVS_RecolorConversation it
+        End If
+    Next
+End Sub
+
+' An email landed in Sent Items, or in the folder it was just moved to:
+' recolor its chain to match the folder the chain is now filed in.
+Public Sub NVS_OnItemFiled(ByVal item As Object)
+    On Error Resume Next
+    If Not NVS_AUTO_COLOR Then Exit Sub
+    If gNVS_Busy Then Exit Sub
+    If TypeOf item Is Outlook.MailItem Then NVS_RecolorConversation item
+End Sub
+
+'==============================================================================
+' Folder -> category (color) mapping, stored in the registry under
+' HKCU\Software\VB and VBA Program Settings\NVS_mail\FolderCategory
+'==============================================================================
+
+Private Function NVS_GetFolderCategory(ByVal f As Outlook.Folder) As String
+    If f Is Nothing Then Exit Function
+    NVS_GetFolderCategory = GetSetting(NVS_APP, SEC_FOLDERS, f.EntryID, "")
+End Function
+
+Private Sub NVS_SaveFolderCategory(ByVal f As Outlook.Folder, ByVal catName As String)
+    SaveSetting NVS_APP, SEC_FOLDERS, f.EntryID, catName
+    Set mMappedCats = Nothing
+End Sub
+
+Private Sub NVS_ClearFolderCategory(ByVal f As Outlook.Folder)
+    On Error Resume Next
+    DeleteSetting NVS_APP, SEC_FOLDERS, f.EntryID
+    Set mMappedCats = Nothing
+End Sub
+
+' 2-D array (row, 0 = folder EntryID / 1 = category) or Empty if none.
+Private Function NVS_GetMappings() As Variant
+    NVS_GetMappings = GetAllSettings(NVS_APP, SEC_FOLDERS)
+End Function
+
+Private Function MappedCategories() As Object
+    If mMappedCats Is Nothing Then
+        Dim d As Object, s As Variant, i As Long, k As String
+        Set d = CreateObject("Scripting.Dictionary")
+        d.CompareMode = vbTextCompare
+        s = GetAllSettings(NVS_APP, SEC_FOLDERS)
+        If IsArray(s) Then
+            For i = LBound(s, 1) To UBound(s, 1)
+                k = CStr(s(i, 1))
+                If k <> "" And Not d.Exists(k) Then d.Add k, True
+            Next
+        End If
+        Set mMappedCats = d
+    End If
+    Set MappedCategories = mMappedCats
+End Function
+
+' Is this one of the categories NVS_mail manages?
+Private Function IsFolderCategory(ByVal catName As String, ByVal alsoStrip As String) As Boolean
+    If catName = "" Then Exit Function
+    If alsoStrip <> "" Then
+        If StrComp(catName, alsoStrip, vbTextCompare) = 0 Then IsFolderCategory = True: Exit Function
+    End If
+    If MappedCategories().Exists(catName) Then IsFolderCategory = True: Exit Function
+    If NVS_CATEGORY_PREFIX <> "" Then
+        If StrComp(Left$(catName, Len(NVS_CATEGORY_PREFIX)), NVS_CATEGORY_PREFIX, vbTextCompare) = 0 Then IsFolderCategory = True
+    End If
+End Function
+
+'==============================================================================
+' Categories and colors
+'==============================================================================
+
+Private Function NVS_ColorNames() As Variant
+    ' Index = OlCategoryColor value.
+    NVS_ColorNames = Array("None", "Red", "Orange", "Peach", "Yellow", "Green", _
+        "Teal", "Olive", "Blue", "Purple", "Maroon", "Steel", "Dark Steel", _
+        "Gray", "Dark Gray", "Black", "Dark Red", "Dark Orange", "Dark Peach", _
+        "Dark Yellow", "Dark Green", "Dark Teal", "Dark Olive", "Dark Blue", _
+        "Dark Purple", "Dark Maroon")
+End Function
+
+Private Function NVS_ColorName(ByVal colorValue As Long) As String
+    Dim names As Variant
+    names = NVS_ColorNames()
+    If colorValue >= 0 And colorValue <= UBound(names) Then
+        NVS_ColorName = names(colorValue)
+    Else
+        NVS_ColorName = "?"
+    End If
+End Function
+
+' Asks for a color (number or name). Returns -1 if the user cancels.
+Private Function NVS_AskColor(ByVal folderName As String, ByVal current As Long) As Long
+    Dim names As Variant, prompt As String, i As Long, s As String
+    names = NVS_ColorNames()
+    For i = 1 To 25
+        prompt = prompt & i & " " & names(i)
+        If i Mod 3 = 0 Then prompt = prompt & vbCrLf Else prompt = prompt & "      "
+    Next
+
+    Do
+        s = InputBox("Color for '" & folderName & "':" & vbCrLf & vbCrLf & prompt & _
+                     vbCrLf & vbCrLf & "Type a number or a color name:", _
+                     NVS_APP & " - folder color", IIf(current > 0, CStr(current), ""))
+        If StrPtr(s) = 0 Then NVS_AskColor = -1: Exit Function
+        s = Trim$(s)
+        If IsNumeric(s) Then
+            i = CLng(s)
+            If i >= 1 And i <= 25 Then NVS_AskColor = i: Exit Function
+        ElseIf s <> "" Then
+            For i = 1 To 25
+                If StrComp(names(i), s, vbTextCompare) = 0 Then NVS_AskColor = i: Exit Function
+            Next
+        End If
+        MsgBox "Please type a number from 1 to 25 or one of the color names.", vbExclamation, NVS_APP
+    Loop
+End Function
+
+' Creates the category in Outlook's master list, or updates its color.
+Private Sub NVS_EnsureCategory(ByVal catName As String, ByVal colorValue As Long)
+    Dim c As Outlook.Category
+    For Each c In Application.Session.Categories
+        If StrComp(c.Name, catName, vbTextCompare) = 0 Then
+            c.Color = colorValue
+            Exit Sub
+        End If
+    Next
+    Application.Session.Categories.Add catName, colorValue
+End Sub
+
+' Returns the category's OlCategoryColor, or -1 if it doesn't exist.
+Private Function NVS_CategoryColor(ByVal catName As String) As Long
+    Dim c As Outlook.Category
+    NVS_CategoryColor = -1
+    If catName = "" Then Exit Function
+    For Each c In Application.Session.Categories
+        If StrComp(c.Name, catName, vbTextCompare) = 0 Then
+            NVS_CategoryColor = c.Color
+            Exit Function
+        End If
+    Next
+End Function
+
+' Windows list separator, which Outlook uses between categories.
+Private Function ListSep() As String
+    Static sep As String
+    If sep = "" Then
+        On Error Resume Next
+        sep = CreateObject("WScript.Shell").RegRead("HKCU\Control Panel\International\sList")
+        On Error GoTo 0
+        If sep = "" Then sep = ","
+    End If
+    ListSep = sep
+End Function
+
+' Gives the item exactly one NVS_mail category (or none if catName = "").
+' Other categories the item has are left alone. Saves only when something
+' changed.
+Private Sub NVS_SetItemFolderCategory(ByVal it As Object, ByVal catName As String, _
+                                    Optional ByVal alsoStrip As String = "")
+    On Error GoTo Done
+    Dim cur As String, parts() As String, i As Long, p As String
+    Dim result As String, hasCat As Boolean, changed As Boolean, sep As String
+
+    sep = ListSep()
+    cur = it.Categories
+    cur = Replace(Replace(cur, ";", ","), sep, ",")
+    parts = Split(cur, ",")
+
+    For i = LBound(parts) To UBound(parts)
+        p = Trim$(parts(i))
+        If p <> "" Then
+            If catName <> "" And StrComp(p, catName, vbTextCompare) = 0 Then
+                If Not hasCat Then
+                    hasCat = True
+                    result = AppendCat(result, p, sep)
+                End If
+            ElseIf IsFolderCategory(p, alsoStrip) Then
+                changed = True            ' drop the stale folder category
+            Else
+                result = AppendCat(result, p, sep)
+            End If
+        End If
+    Next
+
+    If catName <> "" And Not hasCat Then
+        result = AppendCat(result, catName, sep)
+        changed = True
+    End If
+
+    If changed Then
+        it.Categories = result
+        it.Save
+    End If
+Done:
+End Sub
+
+Private Function AppendCat(ByVal list As String, ByVal catName As String, ByVal sep As String) As String
+    If list = "" Then AppendCat = catName Else AppendCat = list & sep & " " & catName
+End Function
+
+'==============================================================================
+' Chains (Outlook conversations)
+'==============================================================================
+
+' Every item in the item's conversation (all folders of that mailbox,
+' including Sent Items). Falls back to just the item itself when the mailbox
+' doesn't support conversations.
+Private Function NVS_ConversationItems(ByVal item As Object) As Collection
+    Dim col As New Collection, conv As Outlook.Conversation
+    Dim roots As Outlook.SimpleItems, i As Long
+
+    On Error Resume Next
+    Set conv = item.GetConversation
+    On Error GoTo 0
+
+    If Not conv Is Nothing Then
+        On Error Resume Next
+        Set roots = conv.GetRootItems
+        On Error GoTo 0
+        If Not roots Is Nothing Then
+            For i = 1 To roots.Count
+                AddBranch conv, roots.Item(i), col, 0
+            Next
+        End If
+    End If
+
+    If col.Count = 0 Then col.Add item
+    Set NVS_ConversationItems = col
+End Function
+
+Private Sub AddBranch(ByVal conv As Outlook.Conversation, ByVal it As Object, _
+                      ByVal col As Collection, ByVal depth As Long)
+    Dim kids As Outlook.SimpleItems, i As Long
+    If depth > 500 Then Exit Sub
+    col.Add it
+    On Error Resume Next
+    Set kids = conv.GetChildren(it)
+    On Error GoTo 0
+    If kids Is Nothing Then Exit Sub
+    For i = 1 To kids.Count
+        AddBranch conv, kids.Item(i), col, depth + 1
+    Next
+End Sub
+
+' True for a normal mail folder that mail gets filed in (not Inbox, Sent
+' Items, Deleted Items, Drafts, Junk, an excluded name, a calendar, ...).
+Public Function NVS_IsFilingFolder(ByVal f As Outlook.Folder) As Boolean
+    On Error GoTo Nope
+    If f Is Nothing Then Exit Function
+    If f.DefaultItemType <> olMailItem Then Exit Function
+
+    Dim st As Outlook.Store, delPath As String
+    Set st = f.Store
+    LoadExclusions st
+    If mExcluded.Exists(f.EntryID) Then Exit Function
+
+    delPath = mStoreDeleted(st.StoreID)
+    If delPath <> "" Then
+        If StrComp(Left$(f.FolderPath, Len(delPath) + 1), delPath & "\", vbTextCompare) = 0 Then Exit Function
+    End If
+
+    If InStr(1, ";" & NVS_EXCLUDED_FOLDER_NAMES & ";", ";" & f.Name & ";", vbTextCompare) > 0 Then Exit Function
+
+    ' The mailbox root itself isn't a filing folder.
+    If f.EntryID = st.GetRootFolder.EntryID Then Exit Function
+
+    NVS_IsFilingFolder = True
+Nope:
+End Function
+
+Private Sub LoadExclusions(ByVal st As Outlook.Store)
+    If mExcluded Is Nothing Then
+        Set mExcluded = CreateObject("Scripting.Dictionary")
+        Set mStoreDeleted = CreateObject("Scripting.Dictionary")
+    End If
+
+    Dim sid As String
+    sid = st.StoreID
+    If mStoreDeleted.Exists(sid) Then Exit Sub
+
+    Dim ids As Variant, i As Long, f As Outlook.Folder, delPath As String
+    ids = Array(olFolderInbox, olFolderSentMail, olFolderDeletedItems, olFolderDrafts, _
+                olFolderOutbox, olFolderJunk, olFolderConflicts, olFolderLocalFailures, _
+                olFolderServerFailures, olFolderSyncIssues, olFolderRssFeeds)
+    For i = LBound(ids) To UBound(ids)
+        Set f = Nothing
+        On Error Resume Next
+        Set f = st.GetDefaultFolder(ids(i))
+        On Error GoTo 0
+        If Not f Is Nothing Then
+            mExcluded(f.EntryID) = True
+            If ids(i) = olFolderDeletedItems Then delPath = f.FolderPath
+        End If
+    Next
+    mStoreDeleted(sid) = delPath
+End Sub
+
+' Received time for mail, sent time for sent mail, else creation time.
+Private Function NVS_ItemTime(ByVal it As Object) As Date
+    Dim t As Date
+    On Error Resume Next
+    t = it.ReceivedTime
+    If t = 0 Or Year(t) >= 4000 Then t = it.SentOn
+    If t = 0 Or Year(t) >= 4000 Then t = it.CreationTime
+    NVS_ItemTime = t
+End Function
+
+' The folder holding the most recent item of the chain that is in a filing
+' folder. Ignores the item whose EntryID is excludeEntryID (use that when
+' working out where to file that item). Nothing if the chain isn't filed.
+Private Function NVS_ChainFolderFromItems(ByVal items As Collection, _
+                                        Optional ByVal excludeEntryID As String = "") As Outlook.Folder
+    Dim it As Object, f As Outlook.Folder, best As Outlook.Folder
+    Dim bestT As Date, t As Date, eid As String
+
+    For Each it In items
+        eid = ""
+        Set f = Nothing
+        On Error Resume Next
+        eid = it.EntryID
+        Set f = it.Parent
+        On Error GoTo 0
+
+        If Not f Is Nothing Then
+            If excludeEntryID = "" Or eid <> excludeEntryID Then
+                If NVS_IsFilingFolder(f) Then
+                    t = NVS_ItemTime(it)
+                    If best Is Nothing Or t > bestT Then
+                        Set best = f
+                        bestT = t
+                    End If
+                End If
+            End If
+        End If
+    Next
+    Set NVS_ChainFolderFromItems = best
+End Function
+
+Private Function NVS_FindChainFolder(ByVal item As Object, ByVal excludeSelf As Boolean) As Outlook.Folder
+    Dim excl As String
+    If excludeSelf Then
+        On Error Resume Next
+        excl = item.EntryID
+        On Error GoTo 0
+    End If
+    Set NVS_FindChainFolder = NVS_ChainFolderFromItems(NVS_ConversationItems(item), excl)
+End Function
+
+'==============================================================================
+' Coloring
+'==============================================================================
+
+' Colors every email in the item's chain with the category of the folder the
+' chain is filed in. Returns True if a color was applied.
+'   force     - run even when no folder has a color yet (used when removing).
+'   alsoStrip - an extra category to remove (a color that was just removed).
+Private Function NVS_RecolorConversation(ByVal item As Object, _
+                                       Optional ByVal force As Boolean = False, _
+                                       Optional ByVal alsoStrip As String = "") As Boolean
+    On Error GoTo Done
+    If Not force Then
+        If MappedCategories().Count = 0 Then Exit Function
+    End If
+
+    Dim items As Collection, chain As Outlook.Folder, cat As String, it As Object
+    Set items = NVS_ConversationItems(item)
+    Set chain = NVS_ChainFolderFromItems(items)
+    If chain Is Nothing Then
+        If alsoStrip = "" Then Exit Function   ' chain not filed: leave as is
+    Else
+        cat = NVS_GetFolderCategory(chain)
+    End If
+
+    For Each it In items
+        NVS_SetItemFolderCategory it, cat, alsoStrip
+    Next
+    NVS_RecolorConversation = (cat <> "")
+Done:
+End Function
+
+' Recolors the chains of the mail in a folder (one pass per conversation).
+' Returns the number of conversations that got a color.
+Private Function NVS_RecolorFolder(ByVal f As Outlook.Folder, ByVal daysBack As Long, _
+                                 Optional ByVal alsoStrip As String = "") As Long
+    Dim its As Outlook.Items, it As Object, seen As Object
+    Dim cid As String, n As Long, i As Long, total As Long, since As String
+
+    On Error GoTo Fail
+    Set seen = CreateObject("Scripting.Dictionary")
+    Set its = f.Items
+    If daysBack > 0 Then
+        since = Format$(DateAdd("d", -daysBack, Date), "ddddd h:nn AMPM")
+        Set its = its.Restrict("[ReceivedTime] >= '" & since & "'")
+    End If
+
+    gNVS_Busy = True
+    total = its.Count
+    For i = 1 To total
+        Set it = Nothing
+        cid = ""
+        On Error Resume Next
+        Set it = its.Item(i)
+        cid = it.ConversationID
+        On Error GoTo Fail
+
+        If Not it Is Nothing Then
+            If cid = "" Then
+                If NVS_RecolorConversation(it, True, alsoStrip) Then n = n + 1
+            ElseIf Not seen.Exists(cid) Then
+                seen.Add cid, True
+                If NVS_RecolorConversation(it, True, alsoStrip) Then n = n + 1
+            End If
+        End If
+        If i Mod 20 = 0 Then DoEvents
+    Next
+Fail:
+    gNVS_Busy = False
+    NVS_RecolorFolder = n
+End Function
+
+'==============================================================================
+' Selection
+'==============================================================================
+
+Private Function NVS_IsMailLike(ByVal obj As Object) As Boolean
+    If obj Is Nothing Then Exit Function
+    If TypeOf obj Is Outlook.MailItem Then
+        NVS_IsMailLike = True
+    ElseIf TypeOf obj Is Outlook.MeetingItem Then
+        NVS_IsMailLike = True
+    End If
+End Function
+
+' The open email (if an email window is active) or the emails selected in
+' the main window. If whole conversations are selected (collapsed headers in
+' conversation view), their emails in the current folder are included.
+Private Function NVS_GetSelectedItems() As Collection
+    Dim col As New Collection, seen As Object, obj As Object, i As Long, j As Long
+    Dim sel As Outlook.Selection, hdrs As Outlook.Selection
+    Dim conv As Outlook.Conversation, cur As Outlook.Folder, it As Object
+    Dim convItems As Collection
+
+    Set seen = CreateObject("Scripting.Dictionary")
+    On Error Resume Next
+
+    If TypeName(Application.ActiveWindow) = "Inspector" Then
+        Set obj = Application.ActiveInspector.CurrentItem
+        If NVS_IsMailLike(obj) Then col.Add obj
+        Set NVS_GetSelectedItems = col
+        Exit Function
+    End If
+
+    Set sel = Application.ActiveExplorer.Selection
+    If sel Is Nothing Then
+        Set NVS_GetSelectedItems = col
+        Exit Function
+    End If
+
+    For i = 1 To sel.Count
+        Set obj = Nothing
+        Set obj = sel.Item(i)
+        If NVS_IsMailLike(obj) Then AddUnique col, seen, obj
+    Next
+
+    ' Collapsed conversation headers -> their emails in this folder.
+    Set hdrs = Nothing
+    Set hdrs = sel.GetSelection(olConversationHeaders)
+    If Not hdrs Is Nothing Then
+        Set cur = Application.ActiveExplorer.CurrentFolder
+        For i = 1 To hdrs.Count
+            Set conv = Nothing
+            Set conv = hdrs.Item(i).GetConversation
+            If Not conv Is Nothing And Not cur Is Nothing Then
+                Set convItems = New Collection
+                For j = 1 To conv.GetRootItems.Count
+                    convItems.Add conv.GetRootItems.Item(j)
+                Next
+                If convItems.Count > 0 Then
+                    For Each it In NVS_ConversationItems(convItems(1))
+                        If NVS_IsMailLike(it) Then
+                            If NVS_SameFolder(it.Parent, cur) Then AddUnique col, seen, it
+                        End If
+                    Next
+                End If
+            End If
+        Next
+    End If
+
+    Set NVS_GetSelectedItems = col
+End Function
+
+Private Sub AddUnique(ByVal col As Collection, ByVal seen As Object, ByVal it As Object)
+    Dim eid As String
+    On Error Resume Next
+    eid = it.EntryID
+    On Error GoTo 0
+    If eid = "" Then
+        col.Add it
+    ElseIf Not seen.Exists(eid) Then
+        seen.Add eid, True
+        col.Add it
+    End If
+End Sub
+
+Private Function NVS_SameFolder(ByVal a As Object, ByVal b As Object) As Boolean
+    On Error Resume Next
+    If a Is Nothing Or b Is Nothing Then Exit Function
+    NVS_SameFolder = Application.Session.CompareEntryIDs(a.EntryID, b.EntryID)
+End Function
+
+'==============================================================================
+' Folder picker
+'==============================================================================
+
+' Shows NVS_mail_FolderPicker with defaultFolder pre-selected. Nothing = cancelled.
+Public Function NVS_PickFolder(ByVal title As String, ByVal info As String, _
+                              ByVal defaultFolder As Outlook.Folder, _
+                              Optional ByVal okCaption As String = "OK") As Outlook.Folder
+    Dim frm As NVS_mail_FolderPicker
+    Set frm = New NVS_mail_FolderPicker
+    frm.Prepare title, info, defaultFolder, okCaption
+    frm.Show
+    If Not frm.Cancelled Then Set NVS_PickFolder = frm.SelectedFolder
+    Unload frm
+End Function
+
+' Builds the folder list for the default mailbox plus any extra stores
+' (e.g. the shared mailbox the current email lives in).
+Public Sub NVS_BuildFolderCache(ByVal extraStores As Collection, ByVal force As Boolean)
+    Dim stores As New Collection, st As Object, key As String, v As Variant
+
+    AddStore stores, Application.Session.DefaultStore
+    If Not extraStores Is Nothing Then
+        For Each v In extraStores
+            AddStore stores, v
+        Next
+    End If
+
+    For Each st In stores
+        key = key & "|" & st.StoreID
+    Next
+    If Not force And key = mCacheKey And gNVS_FolderCount > 0 Then Exit Sub
+
+    gNVS_FolderCount = 0
+    ReDim gNVS_FolderID(0 To 255)
+    ReDim gNVS_FolderStoreID(0 To 255)
+    ReDim gNVS_FolderLabel(0 To 255)
+    ReDim gNVS_FolderPath(0 To 255)
+
+    For Each st In stores
+        On Error Resume Next
+        AddFolderTree st.GetRootFolder, 0, st.StoreID, st.DisplayName, (st.StoreID = Application.Session.DefaultStore.StoreID)
+        On Error GoTo 0
+    Next
+    mCacheKey = key
+End Sub
+
+Private Sub AddStore(ByVal stores As Collection, ByVal st As Object)
+    Dim s As Object
+    If st Is Nothing Then Exit Sub
+    For Each s In stores
+        If s.StoreID = st.StoreID Then Exit Sub
+    Next
+    stores.Add st
+End Sub
+
+Private Sub AddFolderTree(ByVal f As Outlook.Folder, ByVal depth As Long, ByVal storeID As String, _
+                          ByVal storeName As String, ByVal isDefaultStore As Boolean)
+    Dim subs As Outlook.Folders, i As Long, rel As String, p As Long
+    On Error GoTo Done
+
+    If depth > 0 Then
+        If f.DefaultItemType <> olMailItem Then Exit Sub
+        If IsHiddenFolder(f) Then Exit Sub
+    End If
+
+    ' "\\mailbox\Inbox\Projects" -> "Inbox\Projects"
+    rel = Mid$(f.FolderPath, 3)
+    p = InStr(rel, "\")
+    If p > 0 Then rel = Mid$(rel, p + 1) Else rel = storeName
+    If Not isDefaultStore And depth > 0 Then rel = rel & "   [" & storeName & "]"
+
+    If gNVS_FolderCount > UBound(gNVS_FolderID) Then
+        ReDim Preserve gNVS_FolderID(0 To gNVS_FolderCount * 2)
+        ReDim Preserve gNVS_FolderStoreID(0 To gNVS_FolderCount * 2)
+        ReDim Preserve gNVS_FolderLabel(0 To gNVS_FolderCount * 2)
+        ReDim Preserve gNVS_FolderPath(0 To gNVS_FolderCount * 2)
+    End If
+    gNVS_FolderID(gNVS_FolderCount) = f.EntryID
+    gNVS_FolderStoreID(gNVS_FolderCount) = storeID
+    If depth = 0 Then
+        gNVS_FolderLabel(gNVS_FolderCount) = storeName
+    Else
+        gNVS_FolderLabel(gNVS_FolderCount) = String$(depth * 4, " ") & f.Name
+    End If
+    gNVS_FolderPath(gNVS_FolderCount) = rel
+    gNVS_FolderCount = gNVS_FolderCount + 1
+
+    Set subs = f.Folders
+    For i = 1 To subs.Count
+        AddFolderTree subs.Item(i), depth + 1, storeID, storeName, isDefaultStore
+    Next
+Done:
+End Sub
+
+Private Function IsHiddenFolder(ByVal f As Outlook.Folder) As Boolean
+    On Error Resume Next
+    IsHiddenFolder = CBool(f.PropertyAccessor.GetProperty(PR_ATTR_HIDDEN))
+End Function
+
+Public Function NVS_FolderCacheIndex(ByVal entryID As String) As Long
+    Dim i As Long
+    NVS_FolderCacheIndex = -1
+    If entryID = "" Then Exit Function
+    For i = 0 To gNVS_FolderCount - 1
+        If gNVS_FolderID(i) = entryID Then
+            NVS_FolderCacheIndex = i
+            Exit Function
+        End If
+    Next
+End Function
+
+Public Function NVS_FolderFromCache(ByVal index As Long) As Outlook.Folder
+    On Error Resume Next
+    If index < 0 Or index >= gNVS_FolderCount Then Exit Function
+    Set NVS_FolderFromCache = Application.Session.GetFolderFromID(gNVS_FolderID(index), gNVS_FolderStoreID(index))
+End Function
+
+' Remembers / recalls the last folder mail was moved to with NVS_mail.
+Private Sub NVS_SetLastMoveFolder(ByVal f As Outlook.Folder)
+    On Error Resume Next
+    SaveSetting NVS_APP, "Move", "LastFolderID", f.EntryID
+    SaveSetting NVS_APP, "Move", "LastStoreID", f.StoreID
+End Sub
+
+Private Function NVS_GetLastMoveFolder() As Outlook.Folder
+    Dim eid As String, sid As String
+    eid = GetSetting(NVS_APP, "Move", "LastFolderID", "")
+    sid = GetSetting(NVS_APP, "Move", "LastStoreID", "")
+    If eid = "" Then Exit Function
+    On Error Resume Next
+    Set NVS_GetLastMoveFolder = Application.Session.GetFolderFromID(eid, sid)
+End Function
+
+'==============================================================================
+' Email addresses
+'==============================================================================
+
+Private Function NVS_AddressEntrySmtp(ByVal ae As Outlook.AddressEntry) As String
+    Dim s As String
+    On Error Resume Next
+    If ae Is Nothing Then Exit Function
+    Select Case ae.AddressEntryUserType
+        Case olExchangeUserAddressEntry, olExchangeRemoteUserAddressEntry
+            s = ae.GetExchangeUser.PrimarySmtpAddress
+        Case olExchangeDistributionListAddressEntry
+            s = ae.GetExchangeDistributionList.PrimarySmtpAddress
+    End Select
+    If s = "" Then s = ae.PropertyAccessor.GetProperty(PR_SMTP_ADDRESS)
+    If s = "" And InStr(ae.Address, "@") > 0 Then s = ae.Address
+    NVS_AddressEntrySmtp = s
+End Function
+
+Private Function NVS_RecipientSmtp(ByVal r As Outlook.Recipient) As String
+    Dim s As String
+    On Error Resume Next
+    s = r.PropertyAccessor.GetProperty(PR_SMTP_ADDRESS)
+    If s = "" Then s = NVS_AddressEntrySmtp(r.AddressEntry)
+    If s = "" And InStr(r.Address, "@") > 0 Then s = r.Address
+    If s = "" Then s = r.Name
+    NVS_RecipientSmtp = s
+End Function
+
+Private Function NVS_SenderSmtp(ByVal it As Object) As String
+    Dim s As String, ae As Outlook.AddressEntry
+    On Error Resume Next
+    If it.SenderEmailType = "SMTP" Then s = it.SenderEmailAddress
+    If s = "" Then
+        Set ae = it.Sender
+        If Not ae Is Nothing Then s = NVS_AddressEntrySmtp(ae)
+    End If
+    If s = "" And InStr(it.SenderEmailAddress, "@") > 0 Then s = it.SenderEmailAddress
+    NVS_SenderSmtp = s
+End Function
+
+' Your own addresses (all accounts), so they can be left off invites.
+Private Function NVS_MyAddresses() As Object
+    Dim d As Object, i As Long, s As String
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    On Error Resume Next
+    For i = 1 To Application.Session.Accounts.Count
+        s = ""
+        s = Application.Session.Accounts.Item(i).SmtpAddress
+        If s <> "" And Not d.Exists(s) Then d.Add s, True
+    Next
+    s = ""
+    s = NVS_AddressEntrySmtp(Application.Session.CurrentUser.AddressEntry)
+    If s <> "" And Not d.Exists(s) Then d.Add s, True
+    s = ""
+    s = Application.Session.CurrentUser.Name
+    If s <> "" And Not d.Exists(s) Then d.Add s, True
+    Set NVS_MyAddresses = d
+End Function
+
+'==============================================================================
+' Files
+'==============================================================================
+
+' Replaces characters Windows doesn't allow in file names.
+Private Function NVS_SafeFileName(ByVal s As String, Optional ByVal maxLen As Long = 120) As String
+    Dim bad As Variant, i As Long
+    bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+    For i = LBound(bad) To UBound(bad)
+        s = Replace(s, bad(i), "_")
+    Next
+    For i = 0 To 31
+        s = Replace(s, Chr$(i), " ")
+    Next
+    s = Trim$(s)
+    If Len(s) > maxLen Then s = Trim$(Left$(s, maxLen))
+    Do While Len(s) > 0 And (Right$(s, 1) = "." Or Right$(s, 1) = " ")
+        s = Left$(s, Len(s) - 1)
+    Loop
+    NVS_SafeFileName = s
+End Function
+
+Private Sub NVS_SplitExt(ByVal fileName As String, ByRef baseName As String, ByRef ext As String)
+    Dim p As Long
+    p = InStrRev(fileName, ".")
+    If p > 1 Then
+        baseName = Left$(fileName, p - 1)
+        ext = Mid$(fileName, p)
+    Else
+        baseName = fileName
+        ext = ""
+    End If
+End Sub
+
+' folder\base.ext, or folder\base (2).ext etc. if that already exists.
+' Keeps the full path under Windows' 260 character limit.
+Private Function NVS_UniquePath(ByVal folder As String, ByVal baseName As String, ByVal ext As String) As String
+    Dim fso As Object, candidate As String, n As Long, room As Long
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Right$(folder, 1) = "\" Then folder = Left$(folder, Len(folder) - 1)
+
+    room = 250 - Len(folder) - 1 - Len(ext) - 5
+    If room < 10 Then room = 10
+    If Len(baseName) > room Then baseName = Trim$(Left$(baseName, room))
+    If baseName = "" Then baseName = "file"
+
+    candidate = folder & "\" & baseName & ext
+    n = 1
+    Do While fso.FileExists(candidate) Or fso.FolderExists(candidate)
+        n = n + 1
+        candidate = folder & "\" & baseName & " (" & n & ")" & ext
+    Loop
+    NVS_UniquePath = candidate
+End Function
+
+' True for pictures embedded in the body (signature logos etc.).
+Private Function NVS_IsInlineAttachment(ByVal att As Outlook.Attachment, ByVal htmlBody As String) As Boolean
+    Dim cid As String, hidden As Boolean
+    On Error Resume Next
+    hidden = att.PropertyAccessor.GetProperty(PR_ATTACHMENT_HIDDEN)
+    If hidden Then NVS_IsInlineAttachment = True: Exit Function
+    cid = att.PropertyAccessor.GetProperty(PR_ATTACH_CONTENT_ID)
+    If cid <> "" And htmlBody <> "" Then
+        If InStr(1, htmlBody, "cid:" & cid, vbTextCompare) > 0 Then NVS_IsInlineAttachment = True
+    End If
+End Function

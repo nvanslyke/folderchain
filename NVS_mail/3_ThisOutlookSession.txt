@@ -1,0 +1,79 @@
+'==============================================================================
+' NVS_mail - file 3 of 3:  ThisOutlookSession
+'
+' HOW TO ADD: in the VBA editor (Alt+F11) double-click Project1 > Microsoft
+' Outlook Objects > ThisOutlookSession and paste this whole file into it.
+' If ThisOutlookSession already has code of your own, see "If
+' ThisOutlookSession already has code" in README.md.
+'
+' Outlook only sends its events (Outlook starting, new mail arriving, an email
+' being moved) to ThisOutlookSession, so this part can't go in the NVS_mail
+' module. Each event just hands over to NVS_mail, which colors the chain.
+'==============================================================================
+Option Explicit
+
+Private WithEvents nvsExplorer As Outlook.Explorer   ' main window: folder switches
+Private WithEvents nvsShownFolder As Outlook.Folder  ' folder on screen: email moved out
+Private WithEvents nvsInbox As Outlook.Folder        ' Inbox: email moved out
+Private WithEvents nvsMovedTo As Outlook.Items       ' folder an email was just moved to
+Private WithEvents nvsSentItems As Outlook.Items     ' Sent Items: replies you send
+Private nvsMovedToID As String
+
+Private Sub Application_Startup()
+    On Error Resume Next
+    Set nvsInbox = Application.Session.GetDefaultFolder(olFolderInbox)
+    Set nvsSentItems = Application.Session.GetDefaultFolder(olFolderSentMail).Items
+    NvsHookExplorer
+End Sub
+
+Private Sub Application_NewMailEx(ByVal EntryIDCollection As String)
+    NvsHookExplorer
+    NVS_OnNewMail EntryIDCollection
+End Sub
+
+' Follow the main Outlook window, so moves out of whichever folder you're
+' looking at are noticed.
+Private Sub NvsHookExplorer()
+    On Error Resume Next
+    If Not nvsExplorer Is Nothing Then Exit Sub
+    Set nvsExplorer = Application.ActiveExplorer
+    If Not nvsExplorer Is Nothing Then Set nvsShownFolder = nvsExplorer.CurrentFolder
+End Sub
+
+Private Sub nvsExplorer_FolderSwitch()
+    On Error Resume Next
+    Set nvsShownFolder = nvsExplorer.CurrentFolder
+End Sub
+
+Private Sub nvsExplorer_Close()
+    Set nvsShownFolder = Nothing
+    Set nvsExplorer = Nothing
+End Sub
+
+Private Sub nvsShownFolder_BeforeItemMove(ByVal Item As Object, ByVal MoveTo As MAPIFolder, Cancel As Boolean)
+    NvsWatchMoveTo MoveTo
+End Sub
+
+Private Sub nvsInbox_BeforeItemMove(ByVal Item As Object, ByVal MoveTo As MAPIFolder, Cancel As Boolean)
+    NvsWatchMoveTo MoveTo
+End Sub
+
+' An email is about to be moved (Move button, drag and drop, Quick Step...):
+' listen to the folder it's going to, so its chain can be recolored once it
+' arrives there.
+Private Sub NvsWatchMoveTo(ByVal MoveTo As Object)
+    On Error Resume Next
+    If MoveTo Is Nothing Then Exit Sub
+    If MoveTo.EntryID = nvsMovedToID Then Exit Sub
+    If Not NVS_IsFilingFolder(MoveTo) Then Exit Sub
+    Set nvsMovedTo = MoveTo.Items
+    nvsMovedToID = MoveTo.EntryID
+End Sub
+
+Private Sub nvsMovedTo_ItemAdd(ByVal Item As Object)
+    NVS_OnItemFiled Item
+End Sub
+
+Private Sub nvsSentItems_ItemAdd(ByVal Item As Object)
+    NVS_OnItemFiled Item
+End Sub
