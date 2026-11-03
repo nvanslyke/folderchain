@@ -1,6 +1,6 @@
 # folderchain
 
-## FolderChain for Outlook
+## NVS_mail (Outlook tools)
 
 Macros for classic Outlook for Windows that treat an email chain as one unit:
 
@@ -10,7 +10,7 @@ Macros for classic Outlook for Windows that treat an email chain as one unit:
 * Rename attachments on a draft before sending
 * Start a new meeting invite with everyone on the chain, without it landing in the chain
 
-Setup and usage: **[OutlookVBA/README.md](OutlookVBA/README.md)**
+Setup and usage: **[NVS_mail/README.md](NVS_mail/README.md)**
 
 ## Lyrics folder chain (original script)
 

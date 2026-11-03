@@ -1,0 +1,23 @@
+'==============================================================================
+' NVS_mail - file 5 of 7:  NVS_mail_FolderWatcher   (class module)
+'
+' HOW TO ADD: in the VBA editor (Alt+F11) choose Insert > Class Module.
+' Press F4 and change (Name) to  NVS_mail_FolderWatcher  . Delete anything already
+' in the code window (such as "Option Explicit"), then paste this whole file.
+'
+' Watches one folder (Sent Items or a colored folder) and colors the chain
+' of any email that lands in it.
+'==============================================================================
+Option Explicit
+
+Private WithEvents mItems As Outlook.Items
+
+Public Sub Attach(ByVal f As Outlook.Folder)
+    Set mItems = f.Items
+End Sub
+
+Private Sub mItems_ItemAdd(ByVal Item As Object)
+    On Error Resume Next
+    If gNVS_Busy Then Exit Sub
+    If TypeOf Item Is Outlook.MailItem Then NVS_RecolorConversation Item
+End Sub

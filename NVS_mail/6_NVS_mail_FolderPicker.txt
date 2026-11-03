@@ -1,14 +1,14 @@
 '==============================================================================
-' FolderChain for Outlook - folder picker form code
+' NVS_mail - file 6 of 7:  NVS_mail_FolderPicker   (UserForm)
 '
-' HOW TO ADD (once):
-'   1. In the VBA editor choose Insert > UserForm.
-'   2. In the Properties window (F4) change (Name) to:  frmFolderPicker
-'   3. Right-click the form > View Code, delete anything there, and paste
-'      everything below.
-' Don't draw any controls on the form - this code creates them itself.
+' HOW TO ADD: in the VBA editor (Alt+F11) choose Insert > UserForm. Press F4
+' and change (Name) to  NVS_mail_FolderPicker  . Right-click the form > View Code,
+' delete anything already there, then paste this whole file.
+' Leave the form blank - this code creates the list, filter box and buttons
+' itself when the form opens.
 '
-' Keys: type to filter, Up/Down to move, Enter to choose, Esc to cancel.
+' Folder picker. Keys: type to filter, Up/Down to move, Enter to choose,
+' Esc to cancel.
 '==============================================================================
 Option Explicit
 
@@ -103,7 +103,7 @@ Private Sub UserForm_Initialize()
     End With
 End Sub
 
-' Called by FC_PickFolder before the form is shown.
+' Called by NVS_PickFolder before the form is shown.
 Public Sub Prepare(ByVal title As String, ByVal info As String, _
                    ByVal defaultFolder As Outlook.Folder, ByVal okCaption As String)
     Dim defID As String
@@ -119,8 +119,8 @@ Public Sub Prepare(ByVal title As String, ByVal info As String, _
         On Error GoTo 0
     End If
 
-    FC_BuildFolderCache mStores, False
-    mDefaultIndex = FC_FolderCacheIndex(defID)
+    NVS_BuildFolderCache mStores, False
+    mDefaultIndex = NVS_FolderCacheIndex(defID)
     ApplyFilter
 End Sub
 
@@ -129,7 +129,7 @@ Public Property Get Cancelled() As Boolean
 End Property
 
 Public Property Get SelectedFolder() As Outlook.Folder
-    If mResult >= 0 Then Set SelectedFolder = FC_FolderFromCache(mResult)
+    If mResult >= 0 Then Set SelectedFolder = NVS_FolderFromCache(mResult)
 End Property
 
 Private Sub UserForm_Activate()
@@ -149,14 +149,14 @@ Private Sub ApplyFilter()
 
     lstFolders.Clear
     mRowCount = 0
-    ReDim mRows(0 To gFC_FolderCount)
+    ReDim mRows(0 To gNVS_FolderCount)
     sel = -1
 
-    For i = 0 To gFC_FolderCount - 1
+    For i = 0 To gNVS_FolderCount - 1
         If f = "" Then
-            lstFolders.AddItem gFC_FolderLabel(i)
-        ElseIf InStr(1, gFC_FolderPath(i), f, vbTextCompare) > 0 Then
-            lstFolders.AddItem gFC_FolderPath(i)
+            lstFolders.AddItem gNVS_FolderLabel(i)
+        ElseIf InStr(1, gNVS_FolderPath(i), f, vbTextCompare) > 0 Then
+            lstFolders.AddItem gNVS_FolderPath(i)
         Else
             GoTo NextFolder
         End If
@@ -240,9 +240,9 @@ Private Sub btnRefresh_Click()
     Dim keep As Long
     If lstFolders.ListIndex >= 0 Then keep = mRows(lstFolders.ListIndex) Else keep = mDefaultIndex
     Dim keepID As String
-    If keep >= 0 And keep < gFC_FolderCount Then keepID = gFC_FolderID(keep)
-    FC_BuildFolderCache mStores, True
-    mDefaultIndex = FC_FolderCacheIndex(keepID)
+    If keep >= 0 And keep < gNVS_FolderCount Then keepID = gNVS_FolderID(keep)
+    NVS_BuildFolderCache mStores, True
+    mDefaultIndex = NVS_FolderCacheIndex(keepID)
     lstFolders.ListIndex = -1
     ApplyFilter
 End Sub
