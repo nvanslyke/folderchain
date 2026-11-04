@@ -15,6 +15,7 @@ Private Const MODE_COLOR As Long = 2
 Private Const MODE_LIST As Long = 3
 Private Const MODE_RENAME As Long = 4
 Private Const MODE_PROGRESS As Long = 5
+Private Const MODE_TRANSCRIBE As Long = 6
 
 Private Const UI_FONT As String = "Segoe UI"
 Private Const GRID_X As Single = 47     ' color grid position and cell size
@@ -38,6 +39,7 @@ Private lblHint As MSForms.Label
 Private lblSel As MSForms.Label                   ' selection marker
 Private lblPreview As MSForms.Label
 Private lblBar As MSForms.Label
+Private lblLog As MSForms.Label                   ' call transcript text
 Private fraRows As MSForms.Frame
 Private mSw(1 To 25) As MSForms.Label
 Private mBoxes() As MSForms.TextBox
@@ -68,6 +70,10 @@ Private mRowH As Single
 Private mCancelRequested As Boolean
 Private mLastPaint As Single
 Private mBarW As Single
+
+' Call transcript
+Private mStopRequested As Boolean
+Private mDiscardRequested As Boolean
 
 ' Window placement
 Private mOwner As LongPtr           ' the Outlook window you were working in
@@ -147,6 +153,8 @@ Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
         Cancel = True
         If mMode = MODE_PROGRESS Then
             mCancelRequested = True
+        ElseIf mMode = MODE_TRANSCRIBE Then
+            mStopRequested = True               ' closing the window keeps the transcript
         Else
             mCancelled = True
             mAction = "close"
@@ -215,6 +223,10 @@ Private Sub btnOK_Click()
         Case MODE_RENAME
             mCancelled = False
             Me.Hide
+        Case MODE_TRANSCRIBE
+            mStopRequested = True
+            btnOK.Enabled = False
+            btnOK.Caption = "Finishing..."
     End Select
 End Sub
 
@@ -223,6 +235,10 @@ Private Sub btnCancel_Click()
         mCancelRequested = True
         btnCancel.Enabled = False
         btnCancel.Caption = "Stopping..."
+    ElseIf mMode = MODE_TRANSCRIBE Then
+        If MsgBox("Throw away this transcript?", vbYesNo + vbQuestion + vbDefaultButton2, "NVS_mail") = vbYes Then
+            mDiscardRequested = True
+        End If
     Else
         mCancelled = True
         mAction = "close"
@@ -937,6 +953,49 @@ Public Property Get CancelRequested() As Boolean
 End Property
 
 Public Sub ProgressEnd()
+    On Error Resume Next
+    Unload Me
+End Sub
+
+'==============================================================================
+' Call Transcript window (used by NVS_mail_Transcribe, file 4)
+'==============================================================================
+
+Public Sub TranscribeStart(ByVal title As String)
+    mMode = MODE_TRANSCRIBE
+    mStopRequested = False
+    mDiscardRequested = False
+    Me.Caption = title
+    SizeForm 420, 292
+
+    Set lblPrompt = NewLabel(Me, 8, 6, 404, 14, "Starting...")
+    lblPrompt.ForeColor = RGB(96, 96, 96)
+    Set lblLog = NewBlock(Me, 8, 24, 404, 232, RGB(255, 255, 255))
+    lblLog.BorderStyle = 1
+    lblLog.BorderColor = RGB(200, 200, 200)
+    lblLog.WordWrap = True
+    Set btnOK = NewButton(Me, 222, 264, 120, 22, "Stop - put in email")
+    Set btnCancel = NewButton(Me, 348, 264, 64, 22, "Discard")
+
+    Me.Show vbModeless
+    DoEvents
+End Sub
+
+' recent: the latest part of the transcript; status: the line at the top.
+Public Sub TranscribeShow(ByVal recent As String, ByVal status As String)
+    If lblLog.Caption <> recent Then lblLog.Caption = recent
+    If lblPrompt.Caption <> status Then lblPrompt.Caption = status
+End Sub
+
+Public Property Get StopRequested() As Boolean
+    StopRequested = mStopRequested
+End Property
+
+Public Property Get DiscardRequested() As Boolean
+    DiscardRequested = mDiscardRequested
+End Property
+
+Public Sub TranscribeEnd()
     On Error Resume Next
     Unload Me
 End Sub

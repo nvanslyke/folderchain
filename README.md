@@ -9,6 +9,7 @@ Macros for classic Outlook for Windows that treat an email chain as one unit:
 * Color code email chains automatically by the folder they're filed in, with a color you choose for each folder
 * Rename attachments on a draft before sending
 * Start a new meeting invite with everyone on the chain, without it landing in the chain
+* Transcribe a Zoom call (or anything playing on your PC) into an email, using Windows 11's Live Captions
 
 Setup and usage: **[NVS_mail/README.md](NVS_mail/README.md)**
 

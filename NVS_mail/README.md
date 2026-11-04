@@ -12,6 +12,7 @@
 | **Folder Colors** (`NVS_ListFolderColors`) | Shows every colored folder with its color, and lets you add, change or remove colors. |
 | **Rename Attachments** (`NVS_RenameAttachments`) | One window listing every attachment on the email you're writing. Rename any of them, and the extensions are kept. |
 | **Meeting with Chain** (`NVS_ScheduleMeetingWithChain`) | Opens a **new** meeting invite with everyone on the chain. It isn't "Reply with Meeting", so the invite doesn't land in the chain. |
+| **Transcribe Call** (`NVS_TranscribeCall`) | Transcribes a Zoom call (or anything playing on your PC) into an Outlook email, using Windows 11's Live Captions. Optional, in file 4. |
 
 Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `NVS_ApplyRowColorsToView` (see [Colors](#3-color-coding)).
 
@@ -19,15 +20,16 @@ Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `
 
 ## Setup (about 10 minutes, once)
 
-You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the 3 text files in this folder. Each file has a "HOW TO ADD" note at the top.
+You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the 3 text files in this folder, plus optional file 4 if you want to transcribe calls. Each file has a "HOW TO ADD" note at the top.
 
 | File | Where it goes in the VBA editor | Name (F4 > (Name)) |
 |---|---|---|
 | `1_NVS_mail.txt` | Insert > **Module** | `NVS_mail` |
 | `2_NVS_mail_Dialog.txt` | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_Dialog` (must match exactly) |
 | `3_ThisOutlookSession.txt` | Microsoft Outlook Objects > **ThisOutlookSession** (already there) | - |
+| `4_NVS_mail_Transcribe.txt` *(optional)* | **Tools > References** > tick **UIAutomationClient**, then Insert > **Module** | `NVS_mail_Transcribe` |
 
-Three is the minimum. Outlook keeps code, forms and its own events in three separate places, and each needs its own paste.
+Three is the minimum. Outlook keeps code, forms and its own events in three separate places, and each needs its own paste. File 4 is an optional extra; see [Transcribe a call](#6-transcribe-a-call-optional).
 
 **Already set up an earlier version?** See [Updating](#updating-to-a-new-version) instead.
 
@@ -89,8 +91,9 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 | `NVS_ListFolderColors` | Folder Colors |
 | `NVS_SaveLocations` | Save Locations |
 | `NVS_RenameAttachments` | Rename Attachments (works while replying in the reading pane) |
+| `NVS_TranscribeCall` | Transcribe Call (only if you added file 4) |
 
-Only NVS_mail's 12 button macros appear in that list. All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
+Only NVS_mail's button macros appear in that list (12, or 13 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
 
 **Email window** (for Rename Attachments, and Save/Meeting on an open email): open any email or a new message, right-click its ribbon, choose **Customize the Ribbon**, and add the same macros to a new `NVS_mail` group on the **Message** tab.
 
@@ -216,6 +219,32 @@ Select or open any email in the chain and click **Meeting with Chain**. A new me
 
 Nothing is sent. You pick the time, edit the attendees, and click Send yourself. Because the invite is created fresh rather than as a reply, it doesn't appear inside the email chain.
 
+### 6. Transcribe a call (optional)
+
+Outlook's own Dictate only listens to your microphone, so it can't hear the other people on a call. Windows 11's **Live Captions** can. It captions whatever plays on your PC, can include your microphone too, and does all of it on the PC itself. **Transcribe Call** (`NVS_TranscribeCall`, file 4) reads those captions and turns them into a transcript in Outlook.
+
+**One-time setup**
+
+1. Press **Windows key + Ctrl + L** to open Live Captions, and finish its setup. The first time, it downloads its speech files.
+2. In Live Captions, click the gear > **Preferences** and turn on **Include microphone audio**, so your own voice is captured too.
+3. In Zoom, go to **Settings > Audio** and leave **Speaker** on **Same as System**. Live Captions listens to your computer's sound output, so headphones are fine.
+4. Add file 4 in the VBA editor:
+   1. Choose **Tools > References**, tick **UIAutomationClient** (it's part of Windows) and click OK.
+   2. Choose **Insert > Module**, name it `NVS_mail_Transcribe`, and paste in `4_NVS_mail_Transcribe.txt`.
+   3. Choose **Debug > Compile**, then save.
+5. Add `NVS_TranscribeCall` to your ribbon group.
+
+**During a call**
+
+* Click **Transcribe Call**. It starts Live Captions if it isn't already running.
+* A small window shows the transcript as it builds up. You can keep working in Outlook and Zoom meanwhile.
+* Each paragraph starts with the time into the call, like `[12:40]`, and a pause starts a new paragraph. Live Captions doesn't know who is speaking, so there are no names.
+* The transcript is also saved as you go, in a `Call Transcripts` folder inside your base save folder (or in Documents if you haven't set one).
+* Click **Stop - put in email** when the call ends. The transcript goes into the email you were writing when you clicked Transcribe Call, or into a new email if you weren't writing one.
+* **Discard** throws the transcript away. Closing the window counts as Stop.
+
+Only transcribe a call when everyone on it is fine with that. Many places require everyone's consent, and your firm may have its own rules about recording calls.
+
 ---
 
 ## Settings
@@ -248,6 +277,11 @@ Folder colors, save locations and the last folder you moved mail to are stored i
 * **NVS_mail's windows look the wrong size, or blurry, on one of your screens:** this happens when two screens use different scaling. In Outlook, go to **File > Options > General**, set **When using multiple displays** to **Optimize for compatibility**, and restart Outlook. You can also resize the Move Items window by dragging its edge, and it keeps the size you choose.
 * **The Save As window doesn't appear:** NVS_mail falls back to Windows' simpler folder browser. Pick the folder there and click OK.
 
+* **Transcribe Call says Live Captions wasn't found:** it needs Windows 11 (version 22H2 or later). Your IT department may also have turned it off.
+* **"User-defined type not defined" on `CUIAutomation`:** in the VBA editor, tick **UIAutomationClient** under **Tools > References**.
+* **The transcript only has the other people's words:** turn on **Include microphone audio** in Live Captions' preferences.
+* **Nothing gets transcribed:** check that Live Captions itself shows captions while people talk, and that Zoom's speaker is set to **Same as System**.
+
 ## Uninstall
 
-In the VBA editor, right-click the `NVS_mail` module and the `NVS_mail_Dialog` form, choose **Remove...** (answer No to exporting), and delete the NVS_mail code (everything with `nvs` or `NVS_` in it) from ThisOutlookSession. Delete the registry key above. Optionally delete the `Folder: ...` categories in **Categorize > All Categories**.
+In the VBA editor, right-click the `NVS_mail` module, the `NVS_mail_Dialog` form and (if you added it) `NVS_mail_Transcribe`, choose **Remove...** (answer No to exporting), and delete the NVS_mail code (everything with `nvs` or `NVS_` in it) from ThisOutlookSession. Delete the registry key above. Optionally delete the `Folder: ...` categories in **Categorize > All Categories**.

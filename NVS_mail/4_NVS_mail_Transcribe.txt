@@ -1,0 +1,497 @@
+'==============================================================================
+' NVS_mail - optional file 4:  NVS_mail_Transcribe   (standard module)
+'
+' Transcribes a call - Zoom, Teams, anything you hear on your PC - into an
+' Outlook email. The speech recognition is Windows 11's own Live Captions,
+' which listens to your computer's sound output (and your microphone, if you
+' turn that on) and runs on the PC itself.
+'
+' HOW TO ADD (once):
+'   1. In the VBA editor choose Tools > References, tick  UIAutomationClient
+'      and click OK. It's part of Windows - nothing gets installed.
+'   2. Insert > Module, press F4 and change (Name) to  NVS_mail_Transcribe .
+'      Delete anything already in the code window, then paste this whole file.
+' Then add the macro NVS_TranscribeCall to the ribbon. See README.md.
+'==============================================================================
+Option Explicit
+
+'------------------------------------------------------------------------------
+' SETTINGS
+'------------------------------------------------------------------------------
+
+' A pause at least this long (seconds) starts a new paragraph.
+Private Const NEW_PARAGRAPH_AFTER As Long = 3
+
+' How often (seconds) the transcript is saved to its text file during the call.
+Private Const AUTOSAVE_EVERY As Long = 20
+
+'------------------------------------------------------------------------------
+' Internals
+'------------------------------------------------------------------------------
+
+' How Windows 11 names the Live Captions window and its caption text.
+Private Const LC_WINDOW_CLASS As String = "LiveCaptionsDesktopWindow"
+Private Const LC_WINDOW_NAME As String = "Live captions"
+Private Const LC_TEXT_ID As String = "CaptionsTextBlock"
+
+' UI Automation ids
+Private Const PROP_CONTROL_TYPE As Long = 30003
+Private Const PROP_NAME As Long = 30005
+Private Const PROP_AUTOMATION_ID As Long = 30011
+Private Const PROP_CLASS_NAME As Long = 30012
+Private Const TYPE_TEXT As Long = 50020
+Private Const SCOPE_CHILDREN As Long = 2
+Private Const SCOPE_DESCENDANTS As Long = 4
+
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+
+Private mUIA As UIAutomationClient.CUIAutomation
+Private mText As UIAutomationClient.IUIAutomationElement
+Private mSeen() As String        ' sentences already taken from the screen (simplified)
+Private mSeenCount As Long
+Private mTranscript As String
+Private mStart As Date
+Private mLastAdd As Double       ' seconds into the call when text was last added
+
+'==============================================================================
+' The button
+'==============================================================================
+
+' Click when your call starts. A window shows the transcript as it builds up;
+' click Stop when the call ends and the transcript goes into the email you
+' were writing when you started - or into a new email. It's also saved as a
+' text file as you go, in "Call Transcripts" inside your base save folder.
+Public Sub NVS_TranscribeCall()
+    Dim dlg As NVS_mail_Dialog, draft As Object, filePath As String
+    Dim txt As String, lastTxt As String, t As Double, lastChange As Double, lastSave As Double
+
+    Set draft = OpenDraft()
+    Set mText = Nothing
+    On Error Resume Next
+    Set mUIA = New UIAutomationClient.CUIAutomation
+    On Error GoTo 0
+    If mUIA Is Nothing Then
+        MsgBox "Windows UI Automation isn't available on this PC, so Live Captions can't be read.", _
+               vbExclamation, "NVS_mail"
+        Exit Sub
+    End If
+    If Not ConnectLiveCaptions() Then Exit Sub
+
+    ' Whatever Live Captions already shows isn't part of this call.
+    ReDim mSeen(1 To 64)
+    mSeenCount = 0
+    mTranscript = ""
+    lastTxt = CaptionText()
+    RememberScreen lastTxt
+
+    mStart = Now
+    mLastAdd = -999
+    filePath = TranscriptPath()
+    Set dlg = New NVS_mail_Dialog
+    dlg.TranscribeStart "Call Transcript"
+
+    Do
+        WaitMs 400
+        If dlg.StopRequested Or dlg.DiscardRequested Then Exit Do
+        t = Elapsed()
+        txt = CaptionText()
+        If txt <> lastTxt Then
+            lastTxt = txt
+            lastChange = t
+            TakeSentences txt, False, False
+        ElseIf t - lastChange >= 4 Then
+            TakeSentences txt, True, False          ' quiet for a moment: finished sentences are final
+        End If
+        If t - lastSave >= AUTOSAVE_EVERY Then
+            SaveTranscript filePath
+            lastSave = t
+        End If
+        dlg.TranscribeShow RecentText(), StatusLine(t, filePath)
+    Loop
+
+    If dlg.DiscardRequested Then
+        dlg.TranscribeEnd
+        On Error Resume Next
+        Kill filePath
+        Exit Sub
+    End If
+
+    TakeSentences CaptionText(), True, True         ' everything still on screen
+    dlg.TranscribeEnd
+    SaveTranscript filePath
+    If mTranscript = "" Then
+        MsgBox "Nothing was transcribed. Check that Live Captions shows captions while people talk " & _
+               "(see README.md).", vbInformation, "NVS_mail"
+        Exit Sub
+    End If
+    PutInEmail draft
+End Sub
+
+'==============================================================================
+' Live Captions
+'==============================================================================
+
+' Finds Live Captions, starting it if it isn't open. False (after telling you
+' why) if it can't be reached.
+Private Function ConnectLiveCaptions() As Boolean
+    Dim exe As String, t As Single
+
+    Set mText = FindCaptionText()
+    If Not mText Is Nothing Then
+        ConnectLiveCaptions = True
+        Exit Function
+    End If
+
+    exe = LiveCaptionsExe()
+    If exe = "" Then
+        MsgBox "Live Captions wasn't found. It's part of Windows 11 (version 22H2 or later); " & _
+               "Windows 10 doesn't have it.", vbExclamation, "NVS_mail"
+        Exit Function
+    End If
+    On Error Resume Next
+    Shell """" & exe & """", vbNormalNoFocus
+    On Error GoTo 0
+
+    t = Timer
+    Do
+        WaitMs 500
+        Set mText = FindCaptionText()
+        If Not mText Is Nothing Then
+            ConnectLiveCaptions = True
+            Exit Function
+        End If
+    Loop Until Timer - t > 20 Or Timer < t
+
+    MsgBox "Live Captions didn't come up. Open it once yourself with Windows key + Ctrl + L, " & _
+           "finish its setup (the first time it downloads its speech files), then try again.", _
+           vbExclamation, "NVS_mail"
+End Function
+
+Private Function LiveCaptionsExe() As String
+    Dim fso As Object, p As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p = Environ$("WINDIR") & "\Sysnative\LiveCaptions.exe"      ' 32-bit Office on 64-bit Windows
+    If fso.FileExists(p) Then
+        LiveCaptionsExe = p
+        Exit Function
+    End If
+    p = Environ$("WINDIR") & "\System32\LiveCaptions.exe"
+    If fso.FileExists(p) Then LiveCaptionsExe = p
+End Function
+
+' The caption text element of the Live Captions window, or Nothing.
+Private Function FindCaptionText() As UIAutomationClient.IUIAutomationElement
+    Dim win As UIAutomationClient.IUIAutomationElement, el As UIAutomationClient.IUIAutomationElement
+    Dim found As UIAutomationClient.IUIAutomationElementArray, i As Long, nm As String, bestLen As Long
+
+    On Error GoTo Done
+    Set win = mUIA.GetRootElement.FindFirst(SCOPE_CHILDREN, _
+              mUIA.CreatePropertyCondition(PROP_CLASS_NAME, LC_WINDOW_CLASS))
+    If win Is Nothing Then
+        Set win = mUIA.GetRootElement.FindFirst(SCOPE_CHILDREN, _
+                  mUIA.CreatePropertyCondition(PROP_NAME, LC_WINDOW_NAME))
+    End If
+    If win Is Nothing Then Exit Function
+
+    Set el = win.FindFirst(SCOPE_DESCENDANTS, mUIA.CreatePropertyCondition(PROP_AUTOMATION_ID, LC_TEXT_ID))
+    If el Is Nothing Then
+        ' If a Windows update renames it, take the longest text in the window.
+        Set found = win.FindAll(SCOPE_DESCENDANTS, mUIA.CreatePropertyCondition(PROP_CONTROL_TYPE, TYPE_TEXT))
+        For i = 0 To found.Length - 1
+            nm = found.GetElement(i).CurrentName
+            If Len(nm) > bestLen Then
+                bestLen = Len(nm)
+                Set el = found.GetElement(i)
+            End If
+        Next
+    End If
+    Set FindCaptionText = el
+Done:
+End Function
+
+' What Live Captions is showing right now ("" if it's closed).
+Private Function CaptionText() As String
+    On Error GoTo Lost
+    If mText Is Nothing Then Set mText = FindCaptionText()
+    If Not mText Is Nothing Then CaptionText = mText.CurrentName
+    Exit Function
+Lost:
+    Set mText = Nothing                         ' closed or restarted: look again next time
+End Function
+
+'==============================================================================
+' Turning the moving captions into a transcript
+'   Live Captions shows the last few lines and keeps rewriting its newest
+'   words. So only finished sentences are taken - the last two wait until the
+'   next ones arrive or the speaker pauses - and each read is lined up with
+'   what was already taken, so nothing is added twice.
+'==============================================================================
+
+Private Sub TakeSentences(ByVal txt As String, ByVal settled As Boolean, ByVal takeAll As Boolean)
+    Dim s As Collection, n As Long, take As Long, i As Long
+    Set s = Sentences(txt)
+    n = s.Count
+    If n = 0 Then Exit Sub
+    If takeAll Then
+        take = n
+    ElseIf settled Then
+        take = n
+        If Not EndsSentence(s(n)) Then take = n - 1
+    Else
+        take = n - 2
+    End If
+    If take < 1 Then Exit Sub
+    For i = FirstNew(s, take) To take
+        AddToTranscript s(i)
+    Next
+End Sub
+
+' Position (in s) of the first sentence that isn't in the transcript yet:
+' finds where the screen picks up from the sentences already taken.
+Private Function FirstNew(ByVal s As Collection, ByVal take As Long) As Long
+    Dim p As Long, j As Long, lo As Long, ok As Boolean, first As String
+    FirstNew = 1
+    If mSeenCount = 0 Then Exit Function
+    first = Norm(s(1))
+    lo = mSeenCount - 80
+    If lo < 1 Then lo = 1
+    For p = mSeenCount To lo Step -1
+        ' The top sentence on screen may be cut off at the front.
+        If EndsWithText(mSeen(p), first) Then
+            ok = True
+            For j = 2 To take
+                If p + j - 1 > mSeenCount Then Exit For
+                If Norm(s(j)) <> mSeen(p + j - 1) Then
+                    ok = False
+                    Exit For
+                End If
+            Next
+            If ok Then
+                FirstNew = mSeenCount - p + 2
+                Exit Function
+            End If
+        End If
+    Next
+End Function
+
+Private Sub AddToTranscript(ByVal sentence As String)
+    Dim t As Double
+    t = Elapsed()
+    If mTranscript = "" Then
+        mTranscript = "[" & Clock(t) & "] " & sentence
+    ElseIf t - mLastAdd >= NEW_PARAGRAPH_AFTER Then
+        mTranscript = mTranscript & vbCrLf & vbCrLf & "[" & Clock(t) & "] " & sentence
+    Else
+        mTranscript = mTranscript & " " & sentence
+    End If
+    mLastAdd = t
+    Remember Norm(sentence)
+End Sub
+
+Private Sub RememberScreen(ByVal txt As String)
+    Dim v As Variant
+    For Each v In Sentences(txt)
+        Remember Norm(CStr(v))
+    Next
+End Sub
+
+Private Sub Remember(ByVal sentence As String)
+    Dim i As Long
+    If mSeenCount >= 400 Then
+        ' The last 200 are plenty to line the screen up with.
+        For i = 1 To 200
+            mSeen(i) = mSeen(mSeenCount - 200 + i)
+        Next
+        mSeenCount = 200
+    ElseIf mSeenCount >= UBound(mSeen) Then
+        ReDim Preserve mSeen(1 To UBound(mSeen) * 2)
+    End If
+    mSeenCount = mSeenCount + 1
+    mSeen(mSeenCount) = sentence
+End Sub
+
+' The caption text split into sentences (the last one may be unfinished).
+Private Function Sentences(ByVal txt As String) As Collection
+    Dim col As New Collection, i As Long, n As Long, ch As String, start As Long
+    txt = Replace(Replace(txt, vbCr, " "), vbLf, " ")
+    n = Len(txt)
+    start = 1
+    For i = 1 To n
+        ch = Mid$(txt, i, 1)
+        If ch = "." Or ch = "?" Or ch = "!" Then
+            If i = n Then
+                AddPiece col, Mid$(txt, start, i - start + 1)
+                start = i + 1
+            ElseIf Mid$(txt, i + 1, 1) = " " Then
+                AddPiece col, Mid$(txt, start, i - start + 1)
+                start = i + 1
+            End If
+        End If
+    Next
+    If start <= n Then AddPiece col, Mid$(txt, start)
+    Set Sentences = col
+End Function
+
+Private Sub AddPiece(ByVal col As Collection, ByVal piece As String)
+    piece = Trim$(piece)
+    Do While InStr(piece, "  ") > 0
+        piece = Replace(piece, "  ", " ")
+    Loop
+    If piece <> "" Then col.Add piece
+End Sub
+
+Private Function EndsSentence(ByVal s As String) As Boolean
+    Dim c As String
+    c = Right$(s, 1)
+    EndsSentence = (c = "." Or c = "?" Or c = "!")
+End Function
+
+' Lower case, no punctuation: so a sentence still matches if Live Captions
+' changes a comma or a capital letter after it was taken.
+Private Function Norm(ByVal s As String) As String
+    Dim p As Variant
+    s = LCase$(s)
+    For Each p In Array(".", ",", "?", "!", ";", ":", """", "'", ChrW$(&H2019), ChrW$(&H201C), ChrW$(&H201D))
+        s = Replace(s, p, "")
+    Next
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+    Norm = Trim$(s)
+End Function
+
+Private Function EndsWithText(ByVal full As String, ByVal part As String) As Boolean
+    If part = "" Or Len(part) > Len(full) Then Exit Function
+    EndsWithText = (Right$(full, Len(part)) = part)
+End Function
+
+'==============================================================================
+' Output
+'==============================================================================
+
+' Into the email you were writing when you started, or a new one.
+Private Sub PutInEmail(ByVal draft As Object)
+    Dim m As Object, msg As String
+    msg = Header() & mTranscript
+    If Not draft Is Nothing Then
+        On Error Resume Next
+        draft.GetInspector.WordEditor.Content.InsertAfter vbCr & msg
+        If Err.Number = 0 Then
+            draft.Display
+            Exit Sub
+        End If
+        Err.Clear
+        On Error GoTo 0
+    End If
+    Set m = Application.CreateItem(olMailItem)
+    m.Subject = "Call transcript - " & Format$(mStart, "mmm d, yyyy h:nn AM/PM")
+    m.Body = msg
+    m.Display
+End Sub
+
+Private Function Header() As String
+    Header = "Call transcript - " & Format$(mStart, "dddd, mmmm d, yyyy h:nn AM/PM") & vbCrLf & _
+             "(from Windows Live Captions; [mm:ss] = time into the call; no speaker names)" & vbCrLf & vbCrLf
+End Function
+
+Private Sub SaveTranscript(ByVal path As String)
+    Dim f As Object
+    On Error Resume Next
+    Set f = CreateObject("Scripting.FileSystemObject").CreateTextFile(path, True, True)
+    If f Is Nothing Then Exit Sub
+    f.Write Header() & mTranscript
+    f.Close
+End Sub
+
+' "<base save folder>\Call Transcripts\Call transcript 2026-11-04 1002.txt"
+Private Function TranscriptPath() As String
+    Dim fso As Object, base As String, folder As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    base = GetSetting("NVS_mail", "SavePath", "BASE", "")
+    If base = "" Or Not fso.FolderExists(base) Then base = DocumentsFolder()
+    folder = base & "\Call Transcripts"
+    On Error Resume Next
+    If Not fso.FolderExists(folder) Then fso.CreateFolder folder
+    On Error GoTo 0
+    If Not fso.FolderExists(folder) Then folder = base
+    TranscriptPath = folder & "\Call transcript " & Format$(Now, "yyyy-mm-dd hhnn") & ".txt"
+End Function
+
+Private Function DocumentsFolder() As String
+    Dim p As String
+    On Error Resume Next
+    p = CreateObject("WScript.Shell").SpecialFolders("MyDocuments")
+    On Error GoTo 0
+    If p = "" Then p = Environ$("USERPROFILE") & "\Documents"
+    DocumentsFolder = p
+End Function
+
+' The latest part of the transcript, sized to fit the window.
+Private Function RecentText() As String
+    Dim paras() As String, i As Long, rows As Long, out As String
+    If mTranscript = "" Then
+        RecentText = "(Waiting for someone to speak...)"
+        Exit Function
+    End If
+    paras = Split(mTranscript, vbCrLf & vbCrLf)
+    For i = UBound(paras) To 0 Step -1
+        rows = rows + 2 + Len(paras(i)) \ 70
+        If rows > 17 And out <> "" Then Exit For
+        If out = "" Then out = paras(i) Else out = paras(i) & vbCrLf & vbCrLf & out
+    Next
+    If Len(out) > 1100 Then out = "..." & Right$(out, 1100)
+    RecentText = out
+End Function
+
+Private Function StatusLine(ByVal t As Double, ByVal filePath As String) As String
+    If mText Is Nothing Then
+        StatusLine = "Live Captions isn't open - press Windows key + Ctrl + L to bring it back."
+    Else
+        StatusLine = "Transcribing  " & Clock(t) & "   -   also saving to " & _
+                     Mid$(filePath, InStrRev(filePath, "\") + 1)
+    End If
+End Function
+
+'==============================================================================
+' Small helpers
+'==============================================================================
+
+' The email you're writing (its own window or an inline reply), if any.
+Private Function OpenDraft() As Object
+    Dim obj As Object
+    On Error Resume Next
+    If TypeName(Application.ActiveWindow) = "Inspector" Then
+        Set obj = Application.ActiveInspector.CurrentItem
+    Else
+        Set obj = Application.ActiveExplorer.ActiveInlineResponse
+    End If
+    If obj Is Nothing Then Exit Function
+    If Not TypeOf obj Is Outlook.MailItem Then Exit Function
+    If obj.Sent Then Exit Function
+    Set OpenDraft = obj
+End Function
+
+' Seconds since the call started.
+Private Function Elapsed() As Double
+    Elapsed = (Now - mStart) * 86400#
+End Function
+
+Private Function Clock(ByVal secs As Double) As String
+    Dim s As Long
+    s = CLng(secs)
+    If s < 0 Then s = 0
+    If s >= 3600 Then
+        Clock = (s \ 3600) & ":" & Format$((s \ 60) Mod 60, "00") & ":" & Format$(s Mod 60, "00")
+    Else
+        Clock = Format$(s \ 60, "00") & ":" & Format$(s Mod 60, "00")
+    End If
+End Function
+
+' Waits without freezing Outlook.
+Private Sub WaitMs(ByVal ms As Long)
+    Dim i As Long
+    For i = 1 To ms \ 50
+        Sleep 50
+        DoEvents
+    Next
+End Sub
