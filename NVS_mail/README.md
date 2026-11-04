@@ -107,6 +107,8 @@ Only NVS_mail's 12 button macros appear in that list. All the helper code is hid
 
 Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**, and paste the new file. For the form, right-click it and choose View Code first. Then **Debug > Compile**, sign again, save, and restart Outlook. Your folder colors and save locations are kept, since they're stored in the registry rather than in the code.
 
+**Coming from the version with the `NVS_mail_Dialog` form:** replace files 1 and 2. ThisOutlookSession (file 3) hasn't changed.
+
 **Coming from the version with the `NVS_mail_FolderPicker` form:**
 
 1. Click the form `NVS_mail_FolderPicker`, press **F4**, and change its **(Name)** to `NVS_mail_Dialog`.
@@ -151,10 +153,12 @@ To choose a Windows folder, the same Save As window opens. Go into the folder yo
 
 **The Move Items window** works like Outlook's own, plus a search box:
 
-* **Click the arrow** next to a folder, or press **Right** / **Left**, to open or close it. Folders you open stay open next time.
+* Every folder and subfolder is shown, in the same order as in Outlook, with the chain's folder selected.
 * **Search** finds a folder anywhere in your mailbox as you type. **Up** / **Down** pick from the results.
 * **Double-click** a folder, or press **Enter**, to move there.
 * **New...** creates a folder inside the selected one.
+* Click an arrow, or press **Left** / **Right**, to close or reopen a folder.
+* It opens in the middle of the Outlook window you're working in, on the same screen. Drag its edge to resize it, and it remembers the size.
 
 In conversation view, selecting a collapsed conversation moves all of its emails in the current folder.
 
@@ -169,14 +173,14 @@ Colors use Outlook **categories**. Each colored folder gets a category, `Folder:
 3. Click **OK**. If the folder is new to NVS_mail, its existing chains are colored straight away (last `NVS_RECOLOR_DAYS_BACK` days). This covers the folder and its subfolders, plus the chains' emails in your Inbox and Sent Items. A progress window shows how far along it is, Outlook keeps responding, and **Cancel** stops it at any point.
 4. **Changing only the color** of a folder that already has one is instant. Outlook repaints every email with that category by itself.
 
-**Subfolders:** a color covers the folder and every folder inside it. If a subfolder has a color of its own, that one wins for it and its own subfolders. Chains filed outside the colored folder are never given its color.
+**Subfolders:** a color covers the folder and every folder inside it. If a subfolder has a color of its own, that one wins for it and its own subfolders. Emails filed outside the colored folder never get its color.
 
 From then on, colors update automatically:
 
-* New mail in your Inbox gets the color of the folder its chain is filed in.
-* Your sent replies get it too.
-* When you move an email to another folder (with these buttons, Outlook's Move button, drag and drop, or a Quick Step), its whole chain is recolored to match the folder it went to. Moving it into a folder without a color takes the color off. This works for moves out of the Inbox and out of whichever folder you're looking at.
-* A chain only ever has one NVS_mail color, and your other categories are never touched.
+* **Filed emails** always show the color of the folder they're in, or of the colored folder above it.
+* **Emails in your Inbox and Sent Items** show the color of the folder their chain was most recently filed in. New replies and the replies you send arrive already colored.
+* When you move an email to another folder (with these buttons, Outlook's Move button, drag and drop, or a Quick Step), it takes its new folder's color, and the chain's Inbox and Sent Items emails follow it. Emails already filed somewhere else keep their own folder's color. This works for moves out of the Inbox and out of whichever folder you're looking at.
+* NVS_mail only ever gives an email one folder color, and never touches your other categories.
 
 **Folder Colors** (`NVS_ListFolderColors`) shows every colored folder with its color swatch, plus **Add...**, **Change...** (or double-click a row) and **Remove**.
 
@@ -241,6 +245,7 @@ Folder colors, save locations and the last folder you moved mail to are stored i
 * **New mail isn't colored:** the code in ThisOutlookSession (step 4) starts when Outlook starts, so restart Outlook after installing. Also check that the chain is actually filed in a colored folder, using Folder Colors.
 * **"isn't filed anywhere yet" for a chain you did file:** filing works within one mailbox. Mail in a different mailbox, PST file or online archive isn't part of the same Outlook conversation. Also check the folder isn't in `NVS_EXCLUDED_FOLDER_NAMES`.
 * **Unrelated emails share a color:** Outlook sometimes puts emails with the same subject into one conversation, which is common with automated emails. NVS_mail goes by Outlook's conversation, so they count as one chain.
+* **NVS_mail's windows look the wrong size, or blurry, on one of your screens:** this happens when two screens use different scaling. In Outlook, go to **File > Options > General**, set **When using multiple displays** to **Optimize for compatibility**, and restart Outlook. You can also resize the Move Items window by dragging its edge, and it keeps the size you choose.
 * **The Save As window doesn't appear:** NVS_mail falls back to Windows' simpler folder browser. Pick the folder there and click OK.
 
 ## Uninstall

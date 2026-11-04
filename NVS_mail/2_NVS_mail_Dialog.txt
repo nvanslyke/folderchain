@@ -69,15 +69,69 @@ Private mCancelRequested As Boolean
 Private mLastPaint As Single
 Private mBarW As Single
 
+' Window placement
+Private mOwner As LongPtr           ' the Outlook window you were working in
+Private mPlaced As Boolean
+Private mExpanded As Object         ' Move Items: folder EntryID -> True if open
+
+Private Type NvsRect
+    Left As Long
+    Top As Long
+    Right As Long
+    Bottom As Long
+End Type
+
+Private Type NvsMonitorInfo
+    cbSize As Long
+    rcMonitor As NvsRect
+    rcWork As NvsRect
+    dwFlags As Long
+End Type
+
+Private Const GWL_STYLE As Long = -16
+Private Const WS_THICKFRAME As Long = &H40000
+Private Const SWP_NOSIZE As Long = &H1
+Private Const SWP_NOMOVE As Long = &H2
+Private Const SWP_NOZORDER As Long = &H4
+Private Const SWP_NOACTIVATE As Long = &H10
+Private Const SWP_FRAMECHANGED As Long = &H20
+
+Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
+Private Declare PtrSafe Function IsWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
+Private Declare PtrSafe Function FindWindowW Lib "user32" (ByVal lpClassName As LongPtr, _
+    ByVal lpWindowName As LongPtr) As LongPtr
+Private Declare PtrSafe Function GetWindowRect Lib "user32" (ByVal hWnd As LongPtr, ByRef lpRect As NvsRect) As Long
+Private Declare PtrSafe Function SetWindowPos Lib "user32" (ByVal hWnd As LongPtr, ByVal hWndInsertAfter As LongPtr, _
+    ByVal X As Long, ByVal Y As Long, ByVal cx As Long, ByVal cy As Long, ByVal uFlags As Long) As Long
+Private Declare PtrSafe Function MonitorFromWindow Lib "user32" (ByVal hWnd As LongPtr, ByVal dwFlags As Long) As LongPtr
+Private Declare PtrSafe Function GetMonitorInfoW Lib "user32" (ByVal hMonitor As LongPtr, _
+    ByRef lpmi As NvsMonitorInfo) As Long
+#If Win64 Then
+Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long) As LongPtr
+Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
+#Else
+Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" Alias "GetWindowLongW" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long) As LongPtr
+Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" Alias "SetWindowLongW" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
+#End If
+
 Private Sub UserForm_Initialize()
     mCancelled = True
     mResult = -1
     mSel = -1
     mAction = "close"
+    mOwner = GetForegroundWindow()      ' remembered before this window appears
 End Sub
 
 Private Sub UserForm_Activate()
     On Error Resume Next
+    If Not mPlaced Then
+        mPlaced = True
+        PlaceWindow
+    End If
     Select Case mMode
         Case MODE_FOLDER
             txtFilter.SetFocus
@@ -99,6 +153,52 @@ Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
             Me.Hide
         End If
     End If
+End Sub
+
+Private Sub UserForm_Resize()
+    If mMode = MODE_FOLDER Then LayoutFolders
+End Sub
+
+' Centers the window on the Outlook window you were working in - on the same
+' screen, kept inside it - and lets the Move Items window be resized.
+Private Sub PlaceWindow()
+    Dim hForm As LongPtr, ownerRc As NvsRect, formRc As NvsRect, mi As NvsMonitorInfo
+    Dim hMon As LongPtr, w As Long, h As Long, x As Long, y As Long, cap As String
+
+    On Error GoTo Done
+    cap = Me.Caption
+    Me.Caption = "NVS_mail_" & CStr(ObjPtr(Me))
+    hForm = FindWindowW(StrPtr("ThunderDFrame"), StrPtr(Me.Caption))
+    Me.Caption = cap
+    If hForm = 0 Then Exit Sub
+    If mMode = MODE_FOLDER Then MakeResizable hForm
+
+    If mOwner = 0 Then Exit Sub
+    If IsWindow(mOwner) = 0 Then Exit Sub
+    If GetWindowRect(mOwner, ownerRc) = 0 Then Exit Sub
+    If GetWindowRect(hForm, formRc) = 0 Then Exit Sub
+    w = formRc.Right - formRc.Left
+    h = formRc.Bottom - formRc.Top
+    x = ownerRc.Left + (ownerRc.Right - ownerRc.Left - w) \ 2
+    y = ownerRc.Top + (ownerRc.Bottom - ownerRc.Top - h) \ 2
+
+    hMon = MonitorFromWindow(mOwner, 2)             ' the screen Outlook is on
+    mi.cbSize = LenB(mi)
+    If GetMonitorInfoW(hMon, mi) <> 0 Then
+        If x + w > mi.rcWork.Right Then x = mi.rcWork.Right - w
+        If y + h > mi.rcWork.Bottom Then y = mi.rcWork.Bottom - h
+        If x < mi.rcWork.Left Then x = mi.rcWork.Left
+        If y < mi.rcWork.Top Then y = mi.rcWork.Top
+    End If
+    SetWindowPos hForm, 0, x, y, 0, 0, SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE
+Done:
+End Sub
+
+Private Sub MakeResizable(ByVal hForm As LongPtr)
+    Dim style As LongPtr
+    style = GetWindowLongPtrW(hForm, GWL_STYLE)
+    SetWindowLongPtrW hForm, GWL_STYLE, style Or WS_THICKFRAME
+    SetWindowPos hForm, 0, 0, 0, 0, 0, SWP_NOMOVE Or SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE Or SWP_FRAMECHANGED
 End Sub
 
 Private Sub btnOK_Click()
@@ -202,41 +302,54 @@ End Function
 
 '==============================================================================
 ' Move Items window
-'   Click an arrow (or press Right / Left) to open or close a folder; type in
-'   Search to find a folder anywhere; double-click or Enter = OK.
+'   Every folder is shown open, in the order Outlook keeps them. Click an
+'   arrow (or press Left / Right) to close or reopen one; type in Search to
+'   find a folder anywhere; double-click or Enter = OK. The window can be
+'   resized and remembers its size.
 '==============================================================================
 
 Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal hint As String, _
                            ByVal defaultFolder As Outlook.Folder, ByVal okCaption As String) As Outlook.Folder
-    Dim defID As String, i As Long, lbl As MSForms.Label
+    Dim defID As String, i As Long, lbl As MSForms.Label, w As Long, h As Long
 
     mMode = MODE_FOLDER
     Me.Caption = title
-    If hint = "" Then SizeForm 306, 240 Else SizeForm 306, 270
+    If hint = "" Then SizeForm 300, 232 Else SizeForm 300, 262
 
-    Set lblPrompt = NewLabel(Me, 6, 6, 220, 13, prompt)
+    Set lblPrompt = NewLabel(Me, 6, 6, 214, 13, prompt)
     Set lbl = NewLabel(Me, 6, 25, 38, 13, "Search:")
-    Set txtFilter = NewTextBox(Me, 44, 22, 182, 18)
+    Set txtFilter = NewTextBox(Me, 44, 22, 176, 18)
     Set lstFolders = Me.Controls.Add("Forms.ListBox.1")
     With lstFolders
         .Left = 6
         .Top = 44
-        .Width = 220
-        .Height = 190
+        .Width = 214
+        .Height = 182
         .IntegralHeight = False
         .MatchEntry = 2             ' none: typing goes to Search instead
         .Font.Name = UI_FONT
         .Font.Size = 9
     End With
-    Set btnOK = NewButton(Me, 232, 44, 68, 21, okCaption)
-    Set btnCancel = NewButton(Me, 232, 69, 68, 21, "Cancel")
+    Set btnOK = NewButton(Me, 226, 44, 68, 21, okCaption)
+    btnOK.Default = True
+    Set btnCancel = NewButton(Me, 226, 69, 68, 21, "Cancel")
     btnCancel.Cancel = True
-    Set btnNew = NewButton(Me, 232, 94, 68, 21, "New...")
+    Set btnNew = NewButton(Me, 226, 94, 68, 21, "New...")
     If hint <> "" Then
-        Set lblHint = NewLabel(Me, 6, 238, 294, 28, hint)
+        Set lblHint = NewLabel(Me, 6, 232, 288, 28, hint)
         lblHint.ForeColor = RGB(96, 96, 96)
+        lblHint.Font.Size = 8
         lblHint.WordWrap = True
     End If
+
+    ' Reopen at the size you last left it.
+    w = Val(GetSetting("NVS_mail", "Window", "MoveWidth", "0"))
+    h = Val(GetSetting("NVS_mail", "Window", "MoveHeight", "0"))
+    If w >= 240 And h >= 180 Then
+        Me.Width = w
+        Me.Height = h
+    End If
+    LayoutFolders
 
     Set mStores = New Collection
     If Not defaultFolder Is Nothing Then
@@ -246,33 +359,48 @@ Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal 
         On Error GoTo 0
     End If
     NVS_BuildFolderCache mStores, False
-    If gNVS_Expanded Is Nothing Then Set gNVS_Expanded = CreateObject("Scripting.Dictionary")
+
+    ' Every folder starts open, so subfolders show without expanding anything.
+    Set mExpanded = CreateObject("Scripting.Dictionary")
     For i = 0 To gNVS_FolderCount - 1
-        If gNVS_FolderDepth(i) = 0 Then gNVS_Expanded(gNVS_FolderID(i)) = True
+        If gNVS_FolderKids(i) > 0 Then mExpanded(gNVS_FolderID(i)) = True
     Next
     mSel = NVS_FolderCacheIndex(defID)
-    ExpandTo mSel
     RefreshFolders True
 
     Me.Show
+    SaveSetting "NVS_mail", "Window", "MoveWidth", CStr(CLng(Me.Width))
+    SaveSetting "NVS_mail", "Window", "MoveHeight", CStr(CLng(Me.Height))
     If Not mCancelled And mResult >= 0 Then Set PickFolder = NVS_FolderFromCache(mResult)
 End Function
 
-' Opens every folder above folder i so it can be seen.
-Private Sub ExpandTo(ByVal i As Long)
-    If i < 0 Then Exit Sub
-    i = gNVS_FolderParent(i)
-    Do While i >= 0
-        gNVS_Expanded(gNVS_FolderID(i)) = True
-        i = gNVS_FolderParent(i)
-    Loop
+' Fits the controls to the window's current size.
+Private Sub LayoutFolders()
+    Dim w As Single, h As Single, bx As Single, hintH As Single
+    If lstFolders Is Nothing Or btnNew Is Nothing Then Exit Sub
+    w = Me.InsideWidth
+    h = Me.InsideHeight
+    If w < 200 Or h < 150 Then Exit Sub
+    If Not lblHint Is Nothing Then hintH = 30
+    bx = w - 74
+    lblPrompt.Width = bx - 12
+    txtFilter.Width = bx - 6 - txtFilter.Left
+    lstFolders.Width = bx - 12
+    lstFolders.Height = h - lstFolders.Top - 6 - hintH
+    btnOK.Left = bx
+    btnCancel.Left = bx
+    btnNew.Left = bx
+    If Not lblHint Is Nothing Then
+        lblHint.Top = h - hintH + 2
+        lblHint.Width = w - 12
+    End If
 End Sub
 
 Private Function IsShown(ByVal i As Long) As Boolean
     Dim p As Long
     p = gNVS_FolderParent(i)
     Do While p >= 0
-        If Not gNVS_Expanded.Exists(gNVS_FolderID(p)) Then Exit Function
+        If Not mExpanded.Exists(gNVS_FolderID(p)) Then Exit Function
         p = gNVS_FolderParent(p)
     Loop
     IsShown = True
@@ -281,7 +409,7 @@ End Function
 Private Function RowText(ByVal i As Long) As String
     Dim g As String
     If gNVS_FolderKids(i) > 0 Then
-        If gNVS_Expanded.Exists(gNVS_FolderID(i)) Then g = ChrW$(&H25BC) Else g = ChrW$(&H25BA)
+        If mExpanded.Exists(gNVS_FolderID(i)) Then g = ChrW$(&H25BC) Else g = ChrW$(&H25BA)
     Else
         g = "   "
     End If
@@ -344,7 +472,7 @@ End Sub
 Private Sub ToggleFolder(ByVal i As Long)
     Dim id As String
     id = gNVS_FolderID(i)
-    If gNVS_Expanded.Exists(id) Then gNVS_Expanded.Remove id Else gNVS_Expanded(id) = True
+    If mExpanded.Exists(id) Then mExpanded.Remove id Else mExpanded(id) = True
     mSel = i
     RefreshFolders False
 End Sub
@@ -425,12 +553,12 @@ Private Sub lstFolders_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shi
         Case vbKeyRight, vbKeyAdd
             If Not searching And mSel >= 0 Then
                 KeyCode = 0
-                If gNVS_FolderKids(mSel) > 0 And Not gNVS_Expanded.Exists(gNVS_FolderID(mSel)) Then ToggleFolder mSel
+                If gNVS_FolderKids(mSel) > 0 And Not mExpanded.Exists(gNVS_FolderID(mSel)) Then ToggleFolder mSel
             End If
         Case vbKeyLeft, vbKeySubtract
             If Not searching And mSel >= 0 Then
                 KeyCode = 0
-                If gNVS_FolderKids(mSel) > 0 And gNVS_Expanded.Exists(gNVS_FolderID(mSel)) Then
+                If gNVS_FolderKids(mSel) > 0 And mExpanded.Exists(gNVS_FolderID(mSel)) Then
                     ToggleFolder mSel
                 ElseIf gNVS_FolderParent(mSel) >= 0 Then
                     mSel = gNVS_FolderParent(mSel)
@@ -471,7 +599,7 @@ Private Sub btnNew_Click()
     newID = nf.EntryID
     On Error GoTo 0
 
-    gNVS_Expanded(gNVS_FolderID(mSel)) = True
+    mExpanded(gNVS_FolderID(mSel)) = True
     NVS_BuildFolderCache mStores, True
     mSel = NVS_FolderCacheIndex(newID)
     txtFilter.Text = ""
@@ -770,7 +898,7 @@ End Function
 ' Progress window (shown while NVS_mail colors lots of mail)
 '==============================================================================
 
-Public Sub ProgressStart(ByVal title As String, ByVal text As String)
+Public Sub ProgressStart(ByVal title As String, ByVal statusText As String)
     Dim back As MSForms.Label
     mMode = MODE_PROGRESS
     mCancelRequested = False
@@ -781,7 +909,7 @@ Public Sub ProgressStart(ByVal title As String, ByVal text As String)
     Set back = NewBlock(Me, 10, 28, 280, 10, RGB(225, 225, 225))
     Set lblBar = NewBlock(Me, 10, 28, 1, 10, RGB(0, 120, 212))
     mBarW = 280
-    Set lblHint = NewLabel(Me, 10, 44, 280, 13, text)
+    Set lblHint = NewLabel(Me, 10, 44, 280, 13, statusText)
     lblHint.ForeColor = RGB(96, 96, 96)
     Set btnCancel = NewButton(Me, 220, 64, 70, 22, "Cancel")
 
@@ -791,7 +919,7 @@ Public Sub ProgressStart(ByVal title As String, ByVal text As String)
 End Sub
 
 ' Cheap to call often: repaints (and lets Outlook breathe) a few times a second.
-Public Sub ProgressUpdate(ByVal done As Long, ByVal total As Long, ByVal text As String)
+Public Sub ProgressUpdate(ByVal done As Long, ByVal total As Long, ByVal recolored As Long)
     Dim t As Single
     t = Timer
     If t >= mLastPaint And t - mLastPaint < 0.15 Then Exit Sub
@@ -799,7 +927,7 @@ Public Sub ProgressUpdate(ByVal done As Long, ByVal total As Long, ByVal text As
     If total > 0 Then
         If done >= total Then lblBar.Width = mBarW Else lblBar.Width = 1 + (mBarW - 1) * done / total
     End If
-    lblHint.Caption = text
+    lblHint.Caption = done & " of " & total & " emails checked - " & recolored & " recolored"
     Me.Repaint
     DoEvents
 End Sub

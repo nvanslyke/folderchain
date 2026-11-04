@@ -66,6 +66,7 @@ Private Const PR_ATTACH_CONTENT_ID As String = "http://schemas.microsoft.com/map
 Private Const PR_ATTACHMENT_HIDDEN As String = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B"
 Private Const PR_ATTR_HIDDEN As String = "http://schemas.microsoft.com/mapi/proptag/0x10F4000B"
 Private Const PR_PARENT_ENTRYID As String = "http://schemas.microsoft.com/mapi/proptag/0x0E090102"
+Private Const PR_CONVERSATION_ID As String = "http://schemas.microsoft.com/mapi/proptag/0x30130102"
 
 Private Const SEC_FOLDERS As String = "FolderCategory"   ' folder EntryID -> category
 Private Const SEC_SAVE As String = "SavePath"            ' folder EntryID -> Windows folder
@@ -130,6 +131,9 @@ Private mMappedCats As Object    ' category name -> True (Nothing = reload)
 Private mFolderCats As Object    ' folder EntryID -> category (Nothing = reload)
 Private mSavePaths As Object     ' folder EntryID -> Windows folder (Nothing = reload)
 Private mFolderInfo As Object    ' folder key -> Array(filing, category, paint, EntryID)
+Private mInfoStamp As Single     ' when mFolderInfo was started (Timer)
+Private mRecent As Object        ' ConversationID -> Timer: chains recolored a moment ago
+Private mSaveCount As Long       ' emails recolored (for the progress window)
 
 ' Folder list used by the Move Items window (NVS_mail_Dialog).
 Public gNVS_FolderCount As Long
@@ -140,7 +144,6 @@ Public gNVS_FolderPath() As String     ' "Inbox\Projects\Acme" for searching
 Public gNVS_FolderDepth() As Long
 Public gNVS_FolderParent() As Long     ' index of the parent folder, -1 for a mailbox
 Public gNVS_FolderKids() As Long       ' number of subfolders shown
-Public gNVS_Expanded As Object         ' folder EntryID -> True if expanded
 Private mCacheKey As String
 
 '##############################################################################
@@ -261,17 +264,23 @@ Public Sub NVS_MoveToFolder()
 End Sub
 
 Private Sub RecolorMoved(ByVal moved As Collection)
-    Dim it As Object, done As Object, eid As String
+    Dim it As Object, seen As Object, cid As String
     If Not NVS_AUTO_COLOR Then Exit Sub
     If moved.Count = 0 Then Exit Sub
-    Set done = CreateObject("Scripting.Dictionary")
+    Set seen = CreateObject("Scripting.Dictionary")
     gNVS_Busy = True
     For Each it In moved
-        eid = ""
+        cid = ""
         On Error Resume Next
-        eid = it.EntryID
+        cid = it.ConversationID
         On Error GoTo 0
-        If eid = "" Or Not done.Exists(eid) Then RecolorChain it, False, "", done
+        If cid = "" Then
+            RecolorChain it, False, ""
+        ElseIf Not seen.Exists(cid) Then
+            seen.Add cid, True
+            RecolorChain it, False, ""
+            MarkDone cid                ' Outlook's own "item arrived" event can skip it
+        End If
     Next
     gNVS_Busy = False
 End Sub
@@ -407,7 +416,7 @@ Private Sub EditFolderColor(ByVal f As Outlook.Folder)
     If StrComp(oldCat, catName, vbTextCompare) = 0 Then Exit Sub
 
     NVS_SaveFolderCategory f, catName
-    RecolorFolderTree f, NVS_RECOLOR_DAYS_BACK, oldCat, True, "Coloring " & f.Name
+    RecolorFolderTree f, NVS_RECOLOR_DAYS_BACK, oldCat, "Coloring " & f.Name
 End Sub
 
 Private Sub RemoveFolderColorByKey(ByVal key As String, ByVal f As Outlook.Folder, ByVal confirm As Boolean)
@@ -428,7 +437,7 @@ Private Sub RemoveFolderColorByKey(ByVal key As String, ByVal f As Outlook.Folde
     DeleteSetting NVS_APP, SEC_FOLDERS, key
     On Error GoTo 0
     ResetCaches
-    If Not f Is Nothing Then RecolorFolderTree f, NVS_RECOLOR_DAYS_BACK, cat, True, "Removing the color from " & f.Name
+    If Not f Is Nothing Then RecolorFolderTree f, NVS_RECOLOR_DAYS_BACK, cat, "Removing the color from " & f.Name
 End Sub
 
 Public Sub NVS_RecolorSelected()
@@ -441,7 +450,7 @@ Public Sub NVS_RecolorSelected()
     End If
     gNVS_Busy = True
     For Each it In items
-        If RecolorChain(it, True, "") Then colored = colored + 1
+        If RecolorChain(it, True, "", Nothing, True) Then colored = colored + 1
     Next
     gNVS_Busy = False
     If colored = 0 Then
@@ -453,8 +462,8 @@ End Sub
 ' days), e.g. after filing mail while Outlook was closed.
 Public Sub NVS_RecolorInbox()
     ResetCaches
-    RecolorFolderTree Application.Session.GetDefaultFolder(olFolderInbox), NVS_RECOLOR_DAYS_BACK, _
-                      "", False, "Checking Inbox colors"
+    RecolorUnfiled Application.Session.GetDefaultFolder(olFolderInbox), NVS_RECOLOR_DAYS_BACK, _
+                   "Checking Inbox colors"
 End Sub
 
 ' Folder path without the mailbox name: "Inbox\Clients\Acme".
@@ -1102,32 +1111,84 @@ End Sub
 ' Events - called from ThisOutlookSession
 '==============================================================================
 
-' New mail arrived in the Inbox: color it like the rest of its chain.
+' New mail arrived in the Inbox: color it like the rest of its chain. When
+' several emails of one chain arrive together, the chain is done once.
 Public Sub NVS_OnNewMail(ByVal entryIDs As String)
-    Dim ids() As String, i As Long, it As Object
+    Dim ids() As String, i As Long, it As Object, seen As Object, cid As String
     On Error Resume Next
     If Not NVS_AUTO_COLOR Then Exit Sub
-    Set mFolderInfo = Nothing
+    FreshFolderInfo
     If MappedCount() = 0 Then Exit Sub
 
+    Set seen = CreateObject("Scripting.Dictionary")
     ids = Split(entryIDs, ",")
     For i = LBound(ids) To UBound(ids)
         Set it = Nothing
         Set it = Application.Session.GetItemFromID(Trim$(ids(i)))
         If Not it Is Nothing Then
-            If TypeOf it Is Outlook.MailItem Then RecolorChain it, False, ""
+            If TypeOf it Is Outlook.MailItem Then
+                cid = ""
+                cid = it.ConversationID
+                If cid = "" Then
+                    RecolorChain it, False, ""
+                ElseIf Not seen.Exists(cid) Then
+                    seen.Add cid, True
+                    RecolorChain it, False, ""
+                    MarkDone cid
+                End If
+            End If
         End If
     Next
 End Sub
 
-' An email landed in Sent Items, or in the folder it was just moved to:
-' recolor its chain to match the folder the chain is now filed in.
+' An email landed in Sent Items, or in the folder it was just moved to.
 Public Sub NVS_OnItemFiled(ByVal item As Object)
+    Dim cid As String, ci As String
     On Error Resume Next
     If Not NVS_AUTO_COLOR Then Exit Sub
     If gNVS_Busy Then Exit Sub
-    Set mFolderInfo = Nothing
-    If TypeOf item Is Outlook.MailItem Then RecolorChain item, False, ""
+    If Not TypeOf item Is Outlook.MailItem Then Exit Sub
+    FreshFolderInfo
+    If MappedCount() = 0 Then Exit Sub
+
+    cid = item.ConversationID
+    ci = item.ConversationIndex
+    If RecentlyDone(cid) Then
+        FixOwnColor item              ' the rest of its chain was recolored a moment ago
+    ElseIf Len(ci) = 44 And Not NVS_IsFilingFolder(item.Parent) Then
+        ' A brand-new email you sent: there's no chain to color yet.
+    Else
+        RecolorChain item, False, ""
+        MarkDone cid
+    End If
+End Sub
+
+' Folder facts are kept for ten minutes between events, and dropped whenever
+' you use an NVS_mail button, so renamed or moved folders are picked up.
+Private Sub FreshFolderInfo()
+    Dim t As Single
+    t = Timer
+    If mFolderInfo Is Nothing Or t < mInfoStamp Or t - mInfoStamp > 600 Then
+        Set mFolderInfo = Nothing
+        mInfoStamp = t
+    End If
+End Sub
+
+' Chains recolored in the last 10 seconds - several of their emails arriving
+' together, or NVS_mail's own moves - aren't looked up again.
+Private Function RecentlyDone(ByVal cid As String) As Boolean
+    Dim t As Single
+    If cid = "" Or mRecent Is Nothing Then Exit Function
+    If Not mRecent.Exists(cid) Then Exit Function
+    t = Timer
+    RecentlyDone = (t >= mRecent(cid) And t - mRecent(cid) < 10)
+End Function
+
+Private Sub MarkDone(ByVal cid As String)
+    If cid = "" Then Exit Sub
+    If mRecent Is Nothing Then Set mRecent = CreateObject("Scripting.Dictionary")
+    If mRecent.Count > 500 Then mRecent.RemoveAll
+    mRecent(cid) = Timer
 End Sub
 
 '==============================================================================
@@ -1137,6 +1198,7 @@ End Sub
 
 Private Sub ResetCaches()
     Set mFolderInfo = Nothing
+    mInfoStamp = Timer
     Set mFolderCats = Nothing
     Set mMappedCats = Nothing
     Set mSavePaths = Nothing
@@ -1305,8 +1367,9 @@ End Function
 Private Function WantCategories(ByVal cur As String, ByVal catName As String, ByVal alsoStrip As String, _
                                 ByRef result As String) As Boolean
     Dim parts() As String, i As Long, p As String, hasCat As Boolean, changed As Boolean, sep As String
-    sep = ListSep()
     result = ""
+    If cur = "" And catName = "" Then Exit Function    ' nothing there, nothing wanted
+    sep = ListSep()
     cur = Replace(Replace(cur, ";", ","), sep, ",")
     parts = Split(cur, ",")
     For i = LBound(parts) To UBound(parts)
@@ -1376,20 +1439,25 @@ End Function
 ' Chains (Outlook conversations)
 '==============================================================================
 
-' Reads every email of the item's chain from Outlook's conversation table -
-' one quick lookup instead of opening each email. Falls back to walking the
-' conversation when the table isn't available. Returns the number of rows.
+' Reads every email of the item's chain - from Outlook's conversation table
+' when possible, otherwise by walking the conversation. Returns the count.
 Private Function ReadChain(ByVal item As Object, ByRef rows() As NvsRow, ByRef sid As String) As Long
-    Dim conv As Object, tbl As Object, rw As Object, v As Variant
-    Dim n As Long, cCat As Long, cTime As Long, cPar As Long
-
+    Dim conv As Object, n As Long
     On Error Resume Next
     sid = item.Parent.StoreID
     Set conv = item.GetConversation
     On Error GoTo 0
-    If conv Is Nothing Then GoTo UseSlow
+    If Not conv Is Nothing Then n = ReadConversationRows(conv, rows)
+    If n = 0 Then n = ReadChainSlow(item, rows)
+    ReadChain = n
+End Function
 
-    On Error GoTo TableFailed
+' Every email of a conversation from its table - one quick lookup instead of
+' opening each email. 0 if Outlook can't provide the table.
+Private Function ReadConversationRows(ByVal conv As Object, ByRef rows() As NvsRow) As Long
+    Dim tbl As Object, rw As Object, v As Variant, n As Long, cCat As Long, cTime As Long, cPar As Long
+
+    On Error GoTo Failed
     Set tbl = conv.GetTable
     tbl.Columns.Add "Categories"
     cCat = tbl.Columns.Count
@@ -1405,14 +1473,7 @@ Private Function ReadChain(ByVal item As Object, ByRef rows() As NvsRow, ByRef s
         If n > UBound(rows) Then ReDim Preserve rows(1 To 2 * UBound(rows))
         rows(n).EntryID = CStr(rw("EntryID"))
         rows(n).FolderKey = rw.BinaryToString(cPar)
-        v = rw(cCat)
-        If IsArray(v) Then
-            rows(n).Categories = Join(v, ",")
-        ElseIf IsNull(v) Or IsEmpty(v) Then
-            rows(n).Categories = ""
-        Else
-            rows(n).Categories = CStr(v)
-        End If
+        rows(n).Categories = CellText(rw(cCat))
         v = rw(cTime)
         rows(n).Stamp = rw("CreationTime")
         If IsDate(v) Then
@@ -1420,17 +1481,10 @@ Private Function ReadChain(ByVal item As Object, ByRef rows() As NvsRow, ByRef s
         End If
         rows(n).IsMail = IsMailClass(CStr(rw("MessageClass")))
     Loop
-    If n > 0 Then
-        ReadChain = n
-        Exit Function
-    End If
-    GoTo UseSlow
-
-TableFailed:
-    Resume UseSlow
-UseSlow:
-    On Error GoTo 0
-    ReadChain = ReadChainSlow(item, rows)
+    ReadConversationRows = n
+    Exit Function
+Failed:
+    ReadConversationRows = 0
 End Function
 
 ' Same as ReadChain, by opening each email of the conversation.
@@ -1490,7 +1544,7 @@ End Function
 ' remembered: Array(is a filing folder, its color category - inherited from
 ' the nearest colored folder above it -, may its mail be recolored, EntryID).
 Private Function FolderInfo(ByVal key As String, ByVal sid As String) As Variant
-    Dim f As Outlook.Folder, info As Variant
+    Dim f As Outlook.Folder, info As Variant, filing As Boolean, paint As Boolean
     If mFolderInfo Is Nothing Then Set mFolderInfo = CreateObject("Scripting.Dictionary")
     If mFolderInfo.Exists(key) Then
         FolderInfo = mFolderInfo(key)
@@ -1502,12 +1556,13 @@ Private Function FolderInfo(ByVal key As String, ByVal sid As String) As Variant
     Set f = Application.Session.GetFolderFromID(key, sid)
     On Error GoTo 0
     If Not f Is Nothing Then
-        info(0) = NVS_IsFilingFolder(f)
-        info(2) = IsPaintable(f)
+        ClassifyFolder f, filing, paint
+        info(0) = filing
+        info(2) = paint
         On Error Resume Next
         info(3) = f.EntryID
         On Error GoTo 0
-        If info(0) Then info(1) = NearestMapped(f, FolderCats())
+        If filing Then info(1) = NearestMapped(f, FolderCats())
     End If
     mFolderInfo(key) = info
     FolderInfo = info
@@ -1533,47 +1588,43 @@ End Function
 ' True for a normal mail folder that mail gets filed in (not Inbox, Sent
 ' Items, Deleted Items, Drafts, Junk, an excluded name, a calendar...).
 Public Function NVS_IsFilingFolder(ByVal f As Outlook.Folder) As Boolean
-    Dim sid As String, eid As String, delPath As String
-    On Error GoTo Nope
-    If f Is Nothing Then Exit Function
-    If f.DefaultItemType <> olMailItem Then Exit Function
+    Dim filing As Boolean, paint As Boolean
+    ClassifyFolder f, filing, paint
+    NVS_IsFilingFolder = filing
+End Function
 
-    LoadExclusions f
+' One look at a folder answers both questions: is it a filing folder, and
+' may NVS_mail recolor mail in it (not in Deleted Items, Drafts, Outbox, Junk,
+' the sync folders or non-mail folders)?
+Private Sub ClassifyFolder(ByVal f As Object, ByRef filing As Boolean, ByRef paint As Boolean)
+    Dim sid As String, eid As String, delPath As String
+    filing = False
+    paint = False
+    On Error GoTo Quit
+    If f Is Nothing Then Exit Sub
+    If f.DefaultItemType <> olMailItem Then Exit Sub
+
     sid = f.StoreID
+    LoadExclusions f, sid
     eid = f.EntryID
-    If mExcluded.Exists(eid) Then Exit Function
-    If mStoreRoot.Exists(sid) Then
-        If mStoreRoot(sid) = eid Then Exit Function     ' the mailbox itself
-    End If
     delPath = mStoreDeleted(sid)
     If delPath <> "" Then
-        If StrComp(Left$(f.FolderPath, Len(delPath) + 1), delPath & "\", vbTextCompare) = 0 Then Exit Function
+        If StrComp(Left$(f.FolderPath, Len(delPath) + 1), delPath & "\", vbTextCompare) = 0 Then Exit Sub
     End If
-    If InStr(1, ";" & NVS_EXCLUDED_FOLDER_NAMES & ";", ";" & f.Name & ";", vbTextCompare) > 0 Then Exit Function
+    paint = Not mNoPaint.Exists(eid)
 
-    NVS_IsFilingFolder = True
-Nope:
-End Function
-
-' May NVS_mail change the categories of mail in this folder? Not in Deleted
-' Items, Drafts, Outbox, Junk or the sync folders, and not in non-mail folders.
-Private Function IsPaintable(ByVal f As Outlook.Folder) As Boolean
-    Dim delPath As String
-    On Error GoTo Nope
-    If f.DefaultItemType <> olMailItem Then Exit Function
-    LoadExclusions f
-    If mNoPaint.Exists(f.EntryID) Then Exit Function
-    delPath = mStoreDeleted(f.StoreID)
-    If delPath <> "" Then
-        If StrComp(Left$(f.FolderPath, Len(delPath) + 1), delPath & "\", vbTextCompare) = 0 Then Exit Function
+    If mExcluded.Exists(eid) Then Exit Sub
+    If mStoreRoot.Exists(sid) Then
+        If mStoreRoot(sid) = eid Then Exit Sub         ' the mailbox itself
     End If
-    IsPaintable = True
-Nope:
-End Function
+    If InStr(1, ";" & NVS_EXCLUDED_FOLDER_NAMES & ";", ";" & f.Name & ";", vbTextCompare) > 0 Then Exit Sub
+    filing = True
+Quit:
+End Sub
 
 ' Remembers, once per mailbox, its special folders.
-Private Sub LoadExclusions(ByVal f As Outlook.Folder)
-    Dim sid As String, st As Outlook.Store, ids As Variant, i As Long, df As Outlook.Folder, delPath As String
+Private Sub LoadExclusions(ByVal f As Object, ByVal sid As String)
+    Dim st As Outlook.Store, ids As Variant, i As Long, df As Outlook.Folder, delPath As String
     If mExcluded Is Nothing Then
         Set mExcluded = CreateObject("Scripting.Dictionary")
         Set mNoPaint = CreateObject("Scripting.Dictionary")
@@ -1581,7 +1632,6 @@ Private Sub LoadExclusions(ByVal f As Outlook.Folder)
         Set mStoreRoot = CreateObject("Scripting.Dictionary")
     End If
 
-    sid = f.StoreID
     If mStoreDeleted.Exists(sid) Then Exit Sub
     Set st = f.Store
 
@@ -1658,19 +1708,23 @@ End Function
 
 '==============================================================================
 ' Coloring
+'   An email filed in a folder gets that folder's color (or the color of the
+'   nearest colored folder above it). Emails in the Inbox, Sent Items and other
+'   unfiled folders get the color of the folder their chain was most recently
+'   filed in. Only emails whose categories actually change are opened.
 '==============================================================================
 
-' Colors every email in the item's chain with the color of the folder the
-' chain is filed in (or of the nearest colored folder above it). Only emails
-' whose categories actually change are opened and saved. Returns True if a
-' color was applied.
-'   force     - run even when no folder has a color yet (used when removing).
-'   alsoStrip - an extra category to take off (a color just removed or renamed).
-'   done      - optional dictionary; every email of the chain is added to it.
+' Recolors the emails of the item's chain. Returns True if any of them ends
+' up with a color.
+'   force        - run even when no folder has a color yet (used when removing).
+'   alsoStrip    - an extra category to take off (a color just removed or renamed).
+'   done         - optional dictionary; every email of the chain is added to it.
+'   stripUnfiled - take folder colors off a chain that isn't filed anywhere
+'                  (normally such a chain is left alone).
 Private Function RecolorChain(ByVal item As Object, ByVal force As Boolean, ByVal alsoStrip As String, _
-                              Optional ByVal done As Object) As Boolean
-    Dim rows() As NvsRow, n As Long, sid As String, key As String, cat As String, i As Long
-    Dim info As Variant, newCats As String, it As Object
+                              Optional ByVal done As Object, Optional ByVal stripUnfiled As Boolean) As Boolean
+    Dim rows() As NvsRow, n As Long, sid As String, key As String, chainCat As String, want As String
+    Dim i As Long, info As Variant, newCats As String, colored As Boolean
 
     On Error GoTo Quit
     If Not force Then
@@ -1685,85 +1739,132 @@ Private Function RecolorChain(ByVal item As Object, ByVal force As Boolean, ByVa
     End If
 
     key = ChainKey(rows, n, sid, "")
-    If key = "" Then
-        If alsoStrip = "" Then Exit Function       ' chain not filed: leave it as it is
-    Else
+    If key = "" And alsoStrip = "" And Not stripUnfiled Then Exit Function
+    If key <> "" Then
         info = FolderInfo(key, sid)
-        cat = info(1)
+        chainCat = info(1)
     End If
 
     For i = 1 To n
         If rows(i).IsMail Then
             info = FolderInfo(rows(i).FolderKey, sid)
-            If info(2) Then
-                If WantCategories(rows(i).Categories, cat, alsoStrip, newCats) Then
-                    Set it = Nothing
-                    On Error Resume Next
-                    Set it = Application.Session.GetItemFromID(rows(i).EntryID, sid)
-                    If Not it Is Nothing Then
-                        it.Categories = newCats
-                        it.Save
-                    End If
-                    On Error GoTo Quit
+            If info(2) Then                                 ' mail here may be recolored
+                If info(0) Then want = info(1) Else want = chainCat
+                If want <> "" Then colored = True
+                If WantCategories(rows(i).Categories, want, alsoStrip, newCats) Then
+                    SaveCategories rows(i).EntryID, sid, newCats
                 End If
             End If
         End If
     Next
-    RecolorChain = (cat <> "")
+    RecolorChain = colored
 Quit:
 End Function
 
-' Recolors the chains of the mail in a folder - and in its subfolders when
-' withSubfolders is True - with a progress window that has a Cancel button.
-' Each chain is handled once, however many of its emails are in the folders.
+' Gives one email the color of the folder it's filed in (used when the rest
+' of its chain was recolored a moment ago).
+Private Sub FixOwnColor(ByVal item As Object)
+    Dim f As Object, info As Variant, newCats As String
+    On Error GoTo Quit
+    Set f = item.Parent
+    info = FolderInfo(f.EntryID, f.StoreID)
+    If Not info(0) Then Exit Sub
+    If WantCategories(item.Categories, CStr(info(1)), "", newCats) Then
+        item.Categories = newCats
+        item.Save
+    End If
+Quit:
+End Sub
+
+Private Function SaveCategories(ByVal eid As String, ByVal sid As String, ByVal cats As String) As Boolean
+    Dim it As Object
+    On Error Resume Next
+    Set it = Application.Session.GetItemFromID(eid, sid)
+    If it Is Nothing Then Exit Function
+    it.Categories = cats
+    it.Save
+    If Err.Number = 0 Then
+        SaveCategories = True
+        mSaveCount = mSaveCount + 1
+    End If
+End Function
+
+' After a folder's color is set, changed or removed: fixes the mail in the
+' folder and all its subfolders, with a progress window (Cancel stops it).
+' Each email's own color comes straight from its folder's table; only chains
+' that also have emails in the Inbox or Sent Items are looked up as a whole.
 Private Sub RecolorFolderTree(ByVal root As Outlook.Folder, ByVal daysBack As Long, ByVal alsoStrip As String, _
-                              ByVal withSubfolders As Boolean, ByVal caption As String)
-    Dim folders As New Collection, tables As New Collection, f As Object, tbl As Object, rw As Object
-    Dim done As Object, prog As NVS_mail_Dialog, it As Object, pair As Variant
-    Dim crit As String, eid As String, sid As String
-    Dim total As Long, n As Long, colored As Long, i As Long
+                              ByVal caption As String)
+    Dim folders As New Collection, boxes As New Collection, jobs As New Collection
+    Dim unfiled As Object, doneConv As Object, doneIds As Object, prog As NVS_mail_Dialog
+    Dim f As Object, tbl As Object, rw As Object, it As Object, job As Variant
+    Dim crit As String, sid As String, eid As String, cid As String, want As String, newCats As String
+    Dim filing As Boolean, paint As Boolean, needChain As Boolean
+    Dim cCat As Long, cConv As Long, total As Long, n As Long
 
     On Error GoTo Finish
-    If withSubfolders Then CollectMailFolders root, folders Else folders.Add root
-    If daysBack > 0 Then
-        crit = "[ReceivedTime] >= '" & Format$(DateAdd("d", -daysBack, Date), "ddddd h:nn AMPM") & "'"
-    End If
-
+    crit = DateCrit(daysBack)
     Set prog = New NVS_mail_Dialog
     prog.ProgressStart caption, "Finding emails..."
 
+    ' Chains that also have emails in the Inbox or Sent Items.
+    boxes.Add Application.Session.GetDefaultFolder(olFolderInbox)
+    boxes.Add Application.Session.GetDefaultFolder(olFolderSentMail)
+    Set unfiled = ConversationSet(boxes, crit)
+
+    CollectMailFolders root, folders
     For Each f In folders
-        Set tbl = Nothing
-        On Error Resume Next
-        If crit = "" Then Set tbl = f.GetTable() Else Set tbl = f.GetTable(crit)
-        On Error GoTo Finish
+        Set tbl = OpenTable(f, crit)
         If Not tbl Is Nothing Then
-            tables.Add Array(tbl, f.StoreID)
+            cCat = AddColumn(tbl, "Categories")
+            cConv = AddColumn(tbl, PR_CONVERSATION_ID)
+            jobs.Add Array(f, tbl, cCat, cConv)
             total = total + tbl.GetRowCount
         End If
     Next
 
-    Set done = CreateObject("Scripting.Dictionary")
+    Set doneConv = CreateObject("Scripting.Dictionary")
+    Set doneIds = CreateObject("Scripting.Dictionary")
+    mSaveCount = 0
     gNVS_Busy = True
-    For i = 1 To tables.Count
-        pair = tables(i)
-        Set tbl = pair(0)
-        sid = pair(1)
+    For Each job In jobs
+        Set f = job(0)
+        Set tbl = job(1)
+        cCat = job(2)
+        cConv = job(3)
+        sid = f.StoreID
+        ClassifyFolder f, filing, paint
+        want = ""
+        If filing Then want = NearestMapped(f, FolderCats())
+
         Do Until tbl.EndOfTable
             Set rw = tbl.GetNextRow
             n = n + 1
             eid = CStr(rw("EntryID"))
-            If Not done.Exists(eid) Then
-                done(eid) = True
+            cid = ""
+            If cConv > 0 Then cid = rw.BinaryToString(cConv)
+
+            needChain = True
+            If filing And paint And cCat > 0 Then
+                If WantCategories(CellText(rw(cCat)), want, alsoStrip, newCats) Then SaveCategories eid, sid, newCats
+                If Not unfiled Is Nothing And cid <> "" Then needChain = unfiled.Exists(cid)
+            End If
+            If needChain Then
+                If cid <> "" Then
+                    If doneConv.Exists(cid) Then needChain = False Else doneConv(cid) = True
+                ElseIf doneIds.Exists(eid) Then
+                    needChain = False
+                End If
+            End If
+            If needChain Then
                 Set it = Nothing
                 On Error Resume Next
                 Set it = Application.Session.GetItemFromID(eid, sid)
                 On Error GoTo Finish
-                If Not it Is Nothing Then
-                    If RecolorChain(it, True, alsoStrip, done) Then colored = colored + 1
-                End If
+                If Not it Is Nothing Then RecolorChain it, True, alsoStrip, doneIds
             End If
-            prog.ProgressUpdate n, total, n & " of " & total & " emails checked - " & colored & " chains colored"
+
+            prog.ProgressUpdate n, total, mSaveCount
             If prog.CancelRequested Then GoTo Finish
         Loop
     Next
@@ -1772,14 +1873,153 @@ Finish:
     If Not prog Is Nothing Then prog.ProgressEnd
 End Sub
 
-Private Sub CollectMailFolders(ByVal f As Outlook.Folder, ByVal col As Collection)
-    Dim i As Long, subs As Outlook.Folders, isMail As Boolean
+' Re-checks the colors of the mail in the Inbox (or another unfiled folder).
+' Quick: only emails whose chain has an email in a colored folder, or that
+' carry a folder color, are looked at.
+Private Sub RecolorUnfiled(ByVal box As Outlook.Folder, ByVal daysBack As Long, ByVal caption As String)
+    Dim trees As New Collection, seen As Object, colored As Object, doneConv As Object, doneIds As Object
+    Dim s As Variant, i As Long, f As Outlook.Folder, tbl As Object, rw As Object, it As Object
+    Dim prog As NVS_mail_Dialog, eid As String, cid As String, sid As String
+    Dim cCat As Long, cConv As Long, total As Long, n As Long, look As Boolean
+
+    On Error GoTo Finish
+    Set prog = New NVS_mail_Dialog
+    prog.ProgressStart caption, "Reading the colored folders..."
+
+    Set seen = CreateObject("Scripting.Dictionary")
+    s = NVS_GetMappings()
+    If IsArray(s) Then
+        For i = LBound(s, 1) To UBound(s, 1)
+            Set f = Nothing
+            On Error Resume Next
+            Set f = Application.Session.GetFolderFromID(CStr(s(i, 0)))
+            On Error GoTo Finish
+            If Not f Is Nothing Then CollectMailFolders f, trees, seen
+        Next
+    End If
+    Set colored = ConversationSet(trees, "")
+
+    Set tbl = OpenTable(box, DateCrit(daysBack))
+    If tbl Is Nothing Then GoTo Finish
+    cCat = AddColumn(tbl, "Categories")
+    cConv = AddColumn(tbl, PR_CONVERSATION_ID)
+    total = tbl.GetRowCount
+    sid = box.StoreID
+
+    Set doneConv = CreateObject("Scripting.Dictionary")
+    Set doneIds = CreateObject("Scripting.Dictionary")
+    mSaveCount = 0
+    gNVS_Busy = True
+    Do Until tbl.EndOfTable
+        Set rw = tbl.GetNextRow
+        n = n + 1
+        eid = CStr(rw("EntryID"))
+        cid = ""
+        If cConv > 0 Then cid = rw.BinaryToString(cConv)
+
+        look = True
+        If Not colored Is Nothing And cid <> "" And cCat > 0 Then
+            look = colored.Exists(cid) Or HasFolderCategory(CellText(rw(cCat)))
+        End If
+        If look Then
+            If cid <> "" Then
+                If doneConv.Exists(cid) Then look = False Else doneConv(cid) = True
+            ElseIf doneIds.Exists(eid) Then
+                look = False
+            End If
+        End If
+        If look Then
+            Set it = Nothing
+            On Error Resume Next
+            Set it = Application.Session.GetItemFromID(eid, sid)
+            On Error GoTo Finish
+            If Not it Is Nothing Then RecolorChain it, True, "", doneIds, True
+        End If
+
+        prog.ProgressUpdate n, total, mSaveCount
+        If prog.CancelRequested Then GoTo Finish
+    Loop
+Finish:
+    gNVS_Busy = False
+    If Not prog Is Nothing Then prog.ProgressEnd
+End Sub
+
+' ConversationIDs of the mail in these folders, read from their tables
+' without opening any email. Nothing if Outlook can't provide them.
+Private Function ConversationSet(ByVal folders As Collection, ByVal crit As String) As Object
+    Dim d As Object, f As Object, tbl As Object, c As Long
+    On Error GoTo Failed
+    Set d = CreateObject("Scripting.Dictionary")
+    For Each f In folders
+        Set tbl = OpenTable(f, crit)
+        If Not tbl Is Nothing Then
+            tbl.Columns.Add PR_CONVERSATION_ID
+            c = tbl.Columns.Count
+            Do Until tbl.EndOfTable
+                d(tbl.GetNextRow.BinaryToString(c)) = True
+            Loop
+        End If
+    Next
+    Set ConversationSet = d
+    Exit Function
+Failed:
+    Set ConversationSet = Nothing
+End Function
+
+Private Function OpenTable(ByVal f As Object, ByVal crit As String) As Object
     On Error Resume Next
+    If crit = "" Then Set OpenTable = f.GetTable() Else Set OpenTable = f.GetTable(crit)
+End Function
+
+' Adds a column to a table; returns its number, or 0 if Outlook refuses it.
+Private Function AddColumn(ByVal tbl As Object, ByVal colName As String) As Long
+    On Error GoTo Nope
+    tbl.Columns.Add colName
+    AddColumn = tbl.Columns.Count
+Nope:
+End Function
+
+Private Function DateCrit(ByVal daysBack As Long) As String
+    If daysBack > 0 Then
+        DateCrit = "[ReceivedTime] >= '" & Format$(DateAdd("d", -daysBack, Date), "ddddd h:nn AMPM") & "'"
+    End If
+End Function
+
+Private Function CellText(ByVal v As Variant) As String
+    If IsArray(v) Then
+        CellText = Join(v, ",")
+    ElseIf IsNull(v) Or IsEmpty(v) Then
+        CellText = ""
+    Else
+        CellText = CStr(v)
+    End If
+End Function
+
+Private Function HasFolderCategory(ByVal cats As String) As Boolean
+    Dim parts() As String, i As Long
+    If cats = "" Then Exit Function
+    parts = Split(Replace(Replace(cats, ";", ","), ListSep(), ","), ",")
+    For i = LBound(parts) To UBound(parts)
+        If IsFolderCategory(Trim$(parts(i)), "") Then
+            HasFolderCategory = True
+            Exit Function
+        End If
+    Next
+End Function
+
+' f and all its mail subfolders; seen (optional) skips folders already added.
+Private Sub CollectMailFolders(ByVal f As Outlook.Folder, ByVal col As Collection, Optional ByVal seen As Object)
+    Dim i As Long, subs As Outlook.Folders, isMail As Boolean, eid As String
+    On Error Resume Next
+    If seen Is Nothing Then Set seen = CreateObject("Scripting.Dictionary")
+    eid = f.EntryID
+    If seen.Exists(eid) Then Exit Sub
+    seen(eid) = True
     isMail = (f.DefaultItemType = olMailItem)
     If isMail Then col.Add f
     Set subs = f.Folders
     For i = 1 To subs.Count
-        CollectMailFolders subs.Item(i), col
+        CollectMailFolders subs.Item(i), col, seen
     Next
 End Sub
 
@@ -1798,12 +2038,12 @@ End Function
 
 ' The open email (if an email window is active) or the emails selected in
 ' the main window. If whole conversations are selected (collapsed headers in
-' conversation view), their emails in the current folder are included.
+' conversation view), their emails in the current folder are included - read
+' from the conversation table, so only those emails are opened.
 Private Function NVS_GetSelectedItems() As Collection
-    Dim col As New Collection, seen As Object, obj As Object, i As Long, j As Long
-    Dim sel As Outlook.Selection, hdrs As Outlook.Selection
-    Dim conv As Outlook.Conversation, cur As Outlook.Folder, it As Object
-    Dim convItems As Collection
+    Dim col As New Collection, seen As Object, obj As Object, i As Long, j As Long, n As Long
+    Dim sel As Outlook.Selection, hdrs As Outlook.Selection, conv As Object, it As Object
+    Dim cur As Outlook.Folder, curID As String, sid As String, rows() As NvsRow, info As Variant
 
     Set seen = CreateObject("Scripting.Dictionary")
     On Error Resume Next
@@ -1820,7 +2060,6 @@ Private Function NVS_GetSelectedItems() As Collection
         Set NVS_GetSelectedItems = col
         Exit Function
     End If
-
     For i = 1 To sel.Count
         Set obj = Nothing
         Set obj = sel.Item(i)
@@ -1832,16 +2071,30 @@ Private Function NVS_GetSelectedItems() As Collection
     Set hdrs = sel.GetSelection(olConversationHeaders)
     If Not hdrs Is Nothing Then
         Set cur = Application.ActiveExplorer.CurrentFolder
+        curID = cur.EntryID
+        sid = cur.StoreID
         For i = 1 To hdrs.Count
             Set conv = Nothing
             Set conv = hdrs.Item(i).GetConversation
-            If Not conv Is Nothing And Not cur Is Nothing Then
-                Set convItems = New Collection
-                For j = 1 To conv.GetRootItems.Count
-                    convItems.Add conv.GetRootItems.Item(j)
+            n = 0
+            If Not conv Is Nothing Then n = ReadConversationRows(conv, rows)
+            If n > 0 Then
+                For j = 1 To n
+                    If rows(j).IsMail Then
+                        info = FolderInfo(rows(j).FolderKey, sid)
+                        If SameID(CStr(info(3)), curID) Then
+                            Set obj = Nothing
+                            Set obj = Application.Session.GetItemFromID(rows(j).EntryID, sid)
+                            If NVS_IsMailLike(obj) Then AddUnique col, seen, obj
+                        End If
+                    End If
                 Next
-                If convItems.Count > 0 Then
-                    For Each it In NVS_ConversationItems(convItems(1))
+            ElseIf Not conv Is Nothing Then
+                ' No table: walk the conversation instead.
+                Set obj = Nothing
+                Set obj = conv.GetRootItems.Item(1)
+                If Not obj Is Nothing Then
+                    For Each it In NVS_ConversationItems(obj)
                         If NVS_IsMailLike(it) Then
                             If NVS_SameFolder(it.Parent, cur) Then AddUnique col, seen, it
                         End If
@@ -1914,101 +2167,57 @@ Public Sub NVS_BuildFolderCache(ByVal extraStores As Collection, ByVal force As 
     defID = Application.Session.DefaultStore.StoreID
     For Each st In stores
         On Error Resume Next
-        AddFolderTree st.GetRootFolder, 0, -1, st.StoreID, st.DisplayName, (st.StoreID = defID), _
-                      SpecialRanks(st)
+        AddFolderTree st.GetRootFolder, 0, -1, "", st.StoreID, st.DisplayName, (st.StoreID = defID)
         On Error GoTo 0
     Next
     mCacheKey = key
 End Sub
 
+' Adds f and, below it, its mail subfolders in the order Outlook keeps them.
 Private Sub AddFolderTree(ByVal f As Outlook.Folder, ByVal depth As Long, ByVal parentIdx As Long, _
-                          ByVal storeID As String, ByVal storeName As String, ByVal isDefaultStore As Boolean, _
-                          ByVal ranks As Object)
-    Dim subs As Outlook.Folders, kids() As Object, keys() As String, cnt As Long
-    Dim i As Long, j As Long, idx As Long, rel As String, p As Long, tmpF As Object, tmpK As String
+                          ByVal parentPath As String, ByVal storeID As String, ByVal storeName As String, _
+                          ByVal isDefaultStore As Boolean)
+    Dim subs As Outlook.Folders, i As Long, idx As Long, nm As String, rel As String
 
     On Error GoTo Done
     If depth > 0 Then
         If f.DefaultItemType <> olMailItem Then Exit Sub
-        If IsHiddenFolder(f) Then Exit Sub
+        If depth = 1 Then
+            If IsHiddenFolder(f) Then Exit Sub          ' hidden system folders sit at the top
+        End If
     End If
 
-    ' "\\mailbox\Inbox\Projects" -> "Inbox\Projects"
-    rel = Mid$(f.FolderPath, 3)
-    p = InStr(rel, "\")
-    If p > 0 Then rel = Mid$(rel, p + 1) Else rel = storeName
-    If Not isDefaultStore And depth > 0 Then rel = rel & "   [" & storeName & "]"
+    ' Path for Search, e.g. "Inbox\Projects\Acme", built from the parent's.
+    If depth = 0 Then
+        nm = storeName
+        rel = storeName
+    Else
+        nm = f.Name
+        If depth = 1 Then rel = nm Else rel = parentPath & "\" & nm
+    End If
 
     If gNVS_FolderCount > UBound(gNVS_FolderID) Then GrowFolderCache
     idx = gNVS_FolderCount
     gNVS_FolderID(idx) = f.EntryID
     gNVS_FolderStoreID(idx) = storeID
-    If depth = 0 Then gNVS_FolderName(idx) = storeName Else gNVS_FolderName(idx) = f.Name
-    gNVS_FolderPath(idx) = rel
+    gNVS_FolderName(idx) = nm
+    If Not isDefaultStore And depth > 0 Then
+        gNVS_FolderPath(idx) = rel & "   [" & storeName & "]"
+    Else
+        gNVS_FolderPath(idx) = rel
+    End If
     gNVS_FolderDepth(idx) = depth
     gNVS_FolderParent(idx) = parentIdx
     gNVS_FolderKids(idx) = 0
     gNVS_FolderCount = gNVS_FolderCount + 1
     If parentIdx >= 0 Then gNVS_FolderKids(parentIdx) = gNVS_FolderKids(parentIdx) + 1
 
-    ' Subfolders in Outlook's order: Inbox, Drafts, Sent Items, Deleted Items,
-    ' Archive first, then the rest alphabetically.
     Set subs = f.Folders
-    cnt = subs.Count
-    If cnt = 0 Then Exit Sub
-    ReDim kids(1 To cnt)
-    ReDim keys(1 To cnt)
-    For i = 1 To cnt
-        Set kids(i) = subs.Item(i)
-        keys(i) = FolderSortKey(kids(i), ranks)
-    Next
-    For i = 2 To cnt
-        Set tmpF = kids(i)
-        tmpK = keys(i)
-        j = i - 1
-        Do While j >= 1
-            If StrComp(keys(j), tmpK, vbTextCompare) <= 0 Then Exit Do
-            Set kids(j + 1) = kids(j)
-            keys(j + 1) = keys(j)
-            j = j - 1
-        Loop
-        Set kids(j + 1) = tmpF
-        keys(j + 1) = tmpK
-    Next
-    For i = 1 To cnt
-        AddFolderTree kids(i), depth + 1, idx, storeID, storeName, isDefaultStore, ranks
+    For i = 1 To subs.Count
+        AddFolderTree subs.Item(i), depth + 1, idx, rel, storeID, storeName, isDefaultStore
     Next
 Done:
 End Sub
-
-Private Function FolderSortKey(ByVal f As Object, ByVal ranks As Object) As String
-    Dim r As Long, eid As String, nm As String
-    On Error Resume Next
-    eid = f.EntryID
-    nm = f.Name
-    On Error GoTo 0
-    r = 9
-    If Not ranks Is Nothing Then
-        If ranks.Exists(eid) Then r = ranks(eid)
-    End If
-    If r = 9 And StrComp(nm, "Archive", vbTextCompare) = 0 Then r = 5
-    FolderSortKey = r & "|" & nm
-End Function
-
-' EntryID -> position for the folders Outlook lists first.
-Private Function SpecialRanks(ByVal st As Outlook.Store) As Object
-    Dim d As Object, ids As Variant, i As Long, df As Outlook.Folder
-    Set d = CreateObject("Scripting.Dictionary")
-    ids = Array(olFolderInbox, olFolderDrafts, olFolderSentMail, olFolderDeletedItems)
-    For i = 0 To 3
-        Set df = Nothing
-        On Error Resume Next
-        Set df = st.GetDefaultFolder(ids(i))
-        On Error GoTo 0
-        If Not df Is Nothing Then d(df.EntryID) = i + 1
-    Next
-    Set SpecialRanks = d
-End Function
 
 Private Sub GrowFolderCache()
     Dim n As Long
