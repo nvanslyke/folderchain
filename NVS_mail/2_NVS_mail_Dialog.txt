@@ -1,0 +1,814 @@
+'==============================================================================
+' NVS_mail - file 2 of 3:  NVS_mail_Dialog   (UserForm)
+'
+' HOW TO ADD: in the VBA editor (Alt+F11) choose Insert > UserForm. Press F4
+' and change (Name) to  NVS_mail_Dialog  . Right-click the form > View Code,
+' delete anything already there, then paste this whole file.
+' Leave the form blank - this code builds each window itself when it opens:
+' Move Items, Folder Color, the Folder Colors / Save Locations lists, Rename
+' Attachments and the progress window.
+'==============================================================================
+Option Explicit
+
+Private Const MODE_FOLDER As Long = 1
+Private Const MODE_COLOR As Long = 2
+Private Const MODE_LIST As Long = 3
+Private Const MODE_RENAME As Long = 4
+Private Const MODE_PROGRESS As Long = 5
+
+Private Const UI_FONT As String = "Segoe UI"
+Private Const GRID_X As Single = 47     ' color grid position and cell size
+Private Const GRID_Y As Single = 24
+Private Const CELL As Single = 30
+Private Const SWATCH As Single = 24
+
+Private WithEvents btnOK As MSForms.CommandButton
+Private WithEvents btnCancel As MSForms.CommandButton
+Private WithEvents btnNew As MSForms.CommandButton
+Private WithEvents btnAdd As MSForms.CommandButton
+Private WithEvents btnChange As MSForms.CommandButton
+Private WithEvents btnRemove As MSForms.CommandButton
+Private WithEvents txtFilter As MSForms.TextBox
+Private WithEvents lstFolders As MSForms.ListBox
+Private WithEvents lblHit As MSForms.Label        ' invisible click area over swatches / list rows
+Private WithEvents txtCat As MSForms.TextBox
+
+Private lblPrompt As MSForms.Label
+Private lblHint As MSForms.Label
+Private lblSel As MSForms.Label                   ' selection marker
+Private lblPreview As MSForms.Label
+Private lblBar As MSForms.Label
+Private fraRows As MSForms.Frame
+Private mSw(1 To 25) As MSForms.Label
+Private mBoxes() As MSForms.TextBox
+
+Private mMode As Long
+Private mCancelled As Boolean
+Private mAction As String
+
+' Move Items
+Private mRows() As Long          ' list row -> folder index
+Private mRowCount As Long
+Private mSel As Long             ' selected folder index
+Private mResult As Long
+Private mStores As Collection
+Private mSelecting As Boolean
+Private mArrowClick As Boolean
+Private mSkipUp As Boolean
+
+' Folder Color
+Private mColor As Long
+
+' Lists
+Private mListN As Long
+Private mListSel As Long
+Private mRowH As Single
+
+' Progress
+Private mCancelRequested As Boolean
+Private mLastPaint As Single
+Private mBarW As Single
+
+Private Sub UserForm_Initialize()
+    mCancelled = True
+    mResult = -1
+    mSel = -1
+    mAction = "close"
+End Sub
+
+Private Sub UserForm_Activate()
+    On Error Resume Next
+    Select Case mMode
+        Case MODE_FOLDER
+            txtFilter.SetFocus
+        Case MODE_RENAME
+            mBoxes(1).SetFocus
+            mBoxes(1).SelStart = 0
+            mBoxes(1).SelLength = Len(mBoxes(1).Text)
+    End Select
+End Sub
+
+Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
+    If CloseMode = vbFormControlMenu Then
+        Cancel = True
+        If mMode = MODE_PROGRESS Then
+            mCancelRequested = True
+        Else
+            mCancelled = True
+            mAction = "close"
+            Me.Hide
+        End If
+    End If
+End Sub
+
+Private Sub btnOK_Click()
+    Select Case mMode
+        Case MODE_FOLDER
+            ChooseFolder
+        Case MODE_COLOR
+            If mColor >= 1 Then
+                mCancelled = False
+                Me.Hide
+            Else
+                Beep
+            End If
+        Case MODE_RENAME
+            mCancelled = False
+            Me.Hide
+    End Select
+End Sub
+
+Private Sub btnCancel_Click()
+    If mMode = MODE_PROGRESS Then
+        mCancelRequested = True
+        btnCancel.Enabled = False
+        btnCancel.Caption = "Stopping..."
+    Else
+        mCancelled = True
+        mAction = "close"
+        Me.Hide
+    End If
+End Sub
+
+'------------------------------------------------------------------------------
+' Building blocks
+'------------------------------------------------------------------------------
+
+' Sets the size of the area inside the window's border.
+Private Sub SizeForm(ByVal insideW As Single, ByVal insideH As Single)
+    Me.Width = insideW + (Me.Width - Me.InsideWidth)
+    Me.Height = insideH + (Me.Height - Me.InsideHeight)
+End Sub
+
+Private Function NewLabel(ByVal host As Object, ByVal l As Single, ByVal t As Single, _
+                          ByVal w As Single, ByVal h As Single, ByVal cap As String) As MSForms.Label
+    Dim c As MSForms.Label
+    Set c = host.Controls.Add("Forms.Label.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = h
+    c.Caption = cap
+    c.BackStyle = 0                 ' transparent
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewLabel = c
+End Function
+
+' A plain colored rectangle (swatch, highlight, progress bar).
+Private Function NewBlock(ByVal host As Object, ByVal l As Single, ByVal t As Single, _
+                          ByVal w As Single, ByVal h As Single, ByVal colour As Long) As MSForms.Label
+    Dim c As MSForms.Label
+    Set c = NewLabel(host, l, t, w, h, "")
+    c.BackStyle = 1                 ' opaque
+    c.BackColor = colour
+    Set NewBlock = c
+End Function
+
+Private Function NewButton(ByVal host As Object, ByVal l As Single, ByVal t As Single, _
+                           ByVal w As Single, ByVal h As Single, ByVal cap As String) As MSForms.CommandButton
+    Dim c As MSForms.CommandButton
+    Set c = host.Controls.Add("Forms.CommandButton.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = h
+    c.Caption = cap
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewButton = c
+End Function
+
+Private Function NewTextBox(ByVal host As Object, ByVal l As Single, ByVal t As Single, _
+                            ByVal w As Single, ByVal h As Single) As MSForms.TextBox
+    Dim c As MSForms.TextBox
+    Set c = host.Controls.Add("Forms.TextBox.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = h
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewTextBox = c
+End Function
+
+Private Function ContrastText(ByVal colour As Long) As Long
+    Dim r As Long, g As Long, b As Long
+    r = colour And &HFF&
+    g = (colour \ &H100&) And &HFF&
+    b = (colour \ &H10000) And &HFF&
+    If (r * 299 + g * 587 + b * 114) / 1000 > 150 Then ContrastText = RGB(0, 0, 0) Else ContrastText = RGB(255, 255, 255)
+End Function
+
+'==============================================================================
+' Move Items window
+'   Click an arrow (or press Right / Left) to open or close a folder; type in
+'   Search to find a folder anywhere; double-click or Enter = OK.
+'==============================================================================
+
+Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal hint As String, _
+                           ByVal defaultFolder As Outlook.Folder, ByVal okCaption As String) As Outlook.Folder
+    Dim defID As String, i As Long, lbl As MSForms.Label
+
+    mMode = MODE_FOLDER
+    Me.Caption = title
+    If hint = "" Then SizeForm 306, 240 Else SizeForm 306, 270
+
+    Set lblPrompt = NewLabel(Me, 6, 6, 220, 13, prompt)
+    Set lbl = NewLabel(Me, 6, 25, 38, 13, "Search:")
+    Set txtFilter = NewTextBox(Me, 44, 22, 182, 18)
+    Set lstFolders = Me.Controls.Add("Forms.ListBox.1")
+    With lstFolders
+        .Left = 6
+        .Top = 44
+        .Width = 220
+        .Height = 190
+        .IntegralHeight = False
+        .MatchEntry = 2             ' none: typing goes to Search instead
+        .Font.Name = UI_FONT
+        .Font.Size = 9
+    End With
+    Set btnOK = NewButton(Me, 232, 44, 68, 21, okCaption)
+    Set btnCancel = NewButton(Me, 232, 69, 68, 21, "Cancel")
+    btnCancel.Cancel = True
+    Set btnNew = NewButton(Me, 232, 94, 68, 21, "New...")
+    If hint <> "" Then
+        Set lblHint = NewLabel(Me, 6, 238, 294, 28, hint)
+        lblHint.ForeColor = RGB(96, 96, 96)
+        lblHint.WordWrap = True
+    End If
+
+    Set mStores = New Collection
+    If Not defaultFolder Is Nothing Then
+        On Error Resume Next
+        mStores.Add defaultFolder.Store
+        defID = defaultFolder.EntryID
+        On Error GoTo 0
+    End If
+    NVS_BuildFolderCache mStores, False
+    If gNVS_Expanded Is Nothing Then Set gNVS_Expanded = CreateObject("Scripting.Dictionary")
+    For i = 0 To gNVS_FolderCount - 1
+        If gNVS_FolderDepth(i) = 0 Then gNVS_Expanded(gNVS_FolderID(i)) = True
+    Next
+    mSel = NVS_FolderCacheIndex(defID)
+    ExpandTo mSel
+    RefreshFolders True
+
+    Me.Show
+    If Not mCancelled And mResult >= 0 Then Set PickFolder = NVS_FolderFromCache(mResult)
+End Function
+
+' Opens every folder above folder i so it can be seen.
+Private Sub ExpandTo(ByVal i As Long)
+    If i < 0 Then Exit Sub
+    i = gNVS_FolderParent(i)
+    Do While i >= 0
+        gNVS_Expanded(gNVS_FolderID(i)) = True
+        i = gNVS_FolderParent(i)
+    Loop
+End Sub
+
+Private Function IsShown(ByVal i As Long) As Boolean
+    Dim p As Long
+    p = gNVS_FolderParent(i)
+    Do While p >= 0
+        If Not gNVS_Expanded.Exists(gNVS_FolderID(p)) Then Exit Function
+        p = gNVS_FolderParent(p)
+    Loop
+    IsShown = True
+End Function
+
+Private Function RowText(ByVal i As Long) As String
+    Dim g As String
+    If gNVS_FolderKids(i) > 0 Then
+        If gNVS_Expanded.Exists(gNVS_FolderID(i)) Then g = ChrW$(&H25BC) Else g = ChrW$(&H25BA)
+    Else
+        g = "   "
+    End If
+    RowText = Space$(gNVS_FolderDepth(i) * 4) & g & "  " & gNVS_FolderName(i)
+End Function
+
+' Refills the list: the folder tree, or the folders matching Search.
+Private Sub RefreshFolders(ByVal scrollToSel As Boolean)
+    Dim f As String, i As Long, n As Long, arr() As Variant, selRow As Long, topRow As Long
+
+    f = Trim$(txtFilter.Text)
+    ReDim arr(0 To gNVS_FolderCount)
+    ReDim mRows(0 To gNVS_FolderCount)
+    For i = 0 To gNVS_FolderCount - 1
+        If f = "" Then
+            If IsShown(i) Then
+                arr(n) = RowText(i)
+                mRows(n) = i
+                n = n + 1
+            End If
+        ElseIf InStr(1, gNVS_FolderPath(i), f, vbTextCompare) > 0 Then
+            arr(n) = gNVS_FolderPath(i)
+            mRows(n) = i
+            n = n + 1
+        End If
+    Next
+
+    topRow = lstFolders.TopIndex
+    mRowCount = n
+    mSelecting = True
+    If n = 0 Then
+        lstFolders.Clear
+    Else
+        ReDim Preserve arr(0 To n - 1)
+        lstFolders.List = arr
+    End If
+
+    selRow = -1
+    For i = 0 To n - 1
+        If mRows(i) = mSel Then
+            selRow = i
+            Exit For
+        End If
+    Next
+    If selRow < 0 And n > 0 And f <> "" Then
+        selRow = 0
+        mSel = mRows(0)
+    End If
+    If selRow >= 0 Then lstFolders.ListIndex = selRow
+    mSelecting = False
+
+    On Error Resume Next
+    If scrollToSel And selRow >= 0 Then
+        If selRow > 5 Then lstFolders.TopIndex = selRow - 5 Else lstFolders.TopIndex = 0
+    ElseIf topRow >= 0 And topRow < n Then
+        lstFolders.TopIndex = topRow
+    End If
+End Sub
+
+Private Sub ToggleFolder(ByVal i As Long)
+    Dim id As String
+    id = gNVS_FolderID(i)
+    If gNVS_Expanded.Exists(id) Then gNVS_Expanded.Remove id Else gNVS_Expanded(id) = True
+    mSel = i
+    RefreshFolders False
+End Sub
+
+Private Sub MoveSel(ByVal delta As Long)
+    Dim r As Long
+    If mRowCount = 0 Then Exit Sub
+    r = lstFolders.ListIndex + delta
+    If r < 0 Then r = 0
+    If r > mRowCount - 1 Then r = mRowCount - 1
+    lstFolders.ListIndex = r
+End Sub
+
+Private Sub ChooseFolder()
+    If mSel < 0 Then
+        Beep
+        Exit Sub
+    End If
+    mResult = mSel
+    mCancelled = False
+    Me.Hide
+End Sub
+
+Private Sub txtFilter_Change()
+    RefreshFolders True
+End Sub
+
+Private Sub txtFilter_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Select Case KeyCode
+        Case vbKeyReturn: KeyCode = 0: ChooseFolder
+        Case vbKeyDown: KeyCode = 0: MoveSel 1
+        Case vbKeyUp: KeyCode = 0: MoveSel -1
+        Case vbKeyPageDown: KeyCode = 0: MoveSel 10
+        Case vbKeyPageUp: KeyCode = 0: MoveSel -10
+    End Select
+End Sub
+
+Private Sub lstFolders_Change()
+    If mSelecting Then Exit Sub
+    If lstFolders.ListIndex >= 0 And lstFolders.ListIndex < mRowCount Then mSel = mRows(lstFolders.ListIndex)
+End Sub
+
+' A click on the arrow opens or closes the folder.
+Private Sub lstFolders_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim r As Long, i As Long
+    mArrowClick = False
+    If mSkipUp Then
+        mSkipUp = False
+        Exit Sub
+    End If
+    If Button <> 1 Or Trim$(txtFilter.Text) <> "" Then Exit Sub
+    r = lstFolders.ListIndex
+    If r < 0 Or r >= mRowCount Then Exit Sub
+    i = mRows(r)
+    mSel = i
+    If gNVS_FolderKids(i) = 0 Then Exit Sub
+    If X <= 6 + gNVS_FolderDepth(i) * 9.5 + 12 Then
+        mArrowClick = True
+        ToggleFolder i
+    End If
+End Sub
+
+Private Sub lstFolders_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
+    If mArrowClick Then
+        mSkipUp = True              ' a double-click on the arrow just opens/closes
+        Exit Sub
+    End If
+    ChooseFolder
+End Sub
+
+Private Sub lstFolders_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Dim searching As Boolean
+    searching = (Trim$(txtFilter.Text) <> "")
+    Select Case KeyCode
+        Case vbKeyReturn
+            KeyCode = 0
+            ChooseFolder
+        Case vbKeyRight, vbKeyAdd
+            If Not searching And mSel >= 0 Then
+                KeyCode = 0
+                If gNVS_FolderKids(mSel) > 0 And Not gNVS_Expanded.Exists(gNVS_FolderID(mSel)) Then ToggleFolder mSel
+            End If
+        Case vbKeyLeft, vbKeySubtract
+            If Not searching And mSel >= 0 Then
+                KeyCode = 0
+                If gNVS_FolderKids(mSel) > 0 And gNVS_Expanded.Exists(gNVS_FolderID(mSel)) Then
+                    ToggleFolder mSel
+                ElseIf gNVS_FolderParent(mSel) >= 0 Then
+                    mSel = gNVS_FolderParent(mSel)
+                    RefreshFolders True
+                End If
+            End If
+    End Select
+End Sub
+
+' Typing while the list has focus goes into Search.
+Private Sub lstFolders_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
+    If KeyAscii >= 32 Then
+        txtFilter.SetFocus
+        txtFilter.Text = txtFilter.Text & Chr$(KeyAscii)
+        txtFilter.SelStart = Len(txtFilter.Text)
+        KeyAscii = 0
+    End If
+End Sub
+
+' New... creates a folder inside the selected one, like Outlook's Move Items.
+Private Sub btnNew_Click()
+    Dim parentF As Outlook.Folder, nm As String, nf As Outlook.Folder, newID As String
+    If mSel < 0 Then
+        Beep
+        Exit Sub
+    End If
+    nm = Trim$(InputBox("Name of the new folder inside '" & gNVS_FolderName(mSel) & "':", "Create New Folder"))
+    If nm = "" Then Exit Sub
+    Set parentF = NVS_FolderFromCache(mSel)
+    If parentF Is Nothing Then Exit Sub
+
+    On Error Resume Next
+    Set nf = parentF.Folders.Add(nm)
+    If nf Is Nothing Then
+        MsgBox "Couldn't create the folder: " & Err.Description, vbExclamation, "Create New Folder"
+        Exit Sub
+    End If
+    newID = nf.EntryID
+    On Error GoTo 0
+
+    gNVS_Expanded(gNVS_FolderID(mSel)) = True
+    NVS_BuildFolderCache mStores, True
+    mSel = NVS_FolderCacheIndex(newID)
+    txtFilter.Text = ""
+    RefreshFolders True
+End Sub
+
+'==============================================================================
+' Folder Color window - pick a swatch, name the category
+'==============================================================================
+
+' Returns the chosen color (1-25), or -1 if cancelled. Read CategoryName
+' afterwards for the name typed in.
+Public Function PickColor(ByVal title As String, ByVal folderName As String, ByVal current As Long, _
+                          ByVal catName As String) As Long
+    Dim i As Long, lbl As MSForms.Label
+
+    mMode = MODE_COLOR
+    Me.Caption = title
+    SizeForm 244, 284
+
+    Set lblPrompt = NewLabel(Me, 8, 6, 228, 14, "Color for '" & folderName & "' and its subfolders:")
+    Set lblSel = NewBlock(Me, 0, 0, SWATCH + 6, SWATCH + 6, RGB(40, 40, 40))
+    lblSel.Visible = False
+    For i = 1 To 25
+        Set mSw(i) = NewBlock(Me, GRID_X + ((i - 1) Mod 5) * CELL, GRID_Y + ((i - 1) \ 5) * CELL, _
+                              SWATCH, SWATCH, NVS_SwatchColor(i))
+        mSw(i).BorderStyle = 1
+        mSw(i).BorderColor = RGB(255, 255, 255)
+    Next
+    Set lblHit = NewLabel(Me, GRID_X, GRID_Y, 5 * CELL, 5 * CELL, "")
+
+    Set lblHint = NewLabel(Me, 8, 178, 228, 13, "")
+    lblHint.TextAlign = 2               ' centered
+    Set lbl = NewLabel(Me, 8, 196, 228, 13, "Category name (shown on the emails):")
+    Set txtCat = NewTextBox(Me, 8, 210, 228, 18)
+    txtCat.Text = catName
+    Set lblPreview = NewBlock(Me, 8, 232, 228, 18, RGB(240, 240, 240))
+    Set btnOK = NewButton(Me, 92, 256, 70, 22, "OK")
+    btnOK.Default = True
+    Set btnCancel = NewButton(Me, 166, 256, 70, 22, "Cancel")
+    btnCancel.Cancel = True
+
+    If current >= 1 And current <= 25 Then SelectSwatch current Else SelectSwatch 0
+
+    Me.Show
+    If mCancelled Then PickColor = -1 Else PickColor = mColor
+End Function
+
+Public Property Get CategoryName() As String
+    If Not txtCat Is Nothing Then CategoryName = Trim$(txtCat.Text)
+End Property
+
+Private Sub SelectSwatch(ByVal i As Long)
+    mColor = i
+    If i >= 1 And i <= 25 Then
+        lblSel.Left = mSw(i).Left - 3
+        lblSel.Top = mSw(i).Top - 3
+        lblSel.Visible = True
+        lblHint.Caption = NVS_ColorName(i)
+        lblPreview.BackColor = NVS_SwatchColor(i)
+        lblPreview.ForeColor = ContrastText(NVS_SwatchColor(i))
+    Else
+        lblSel.Visible = False
+        lblHint.Caption = "Click a color"
+        lblPreview.BackColor = RGB(240, 240, 240)
+        lblPreview.ForeColor = RGB(96, 96, 96)
+    End If
+    UpdatePreview
+End Sub
+
+Private Sub UpdatePreview()
+    If Not lblPreview Is Nothing Then lblPreview.Caption = "  " & txtCat.Text
+End Sub
+
+Private Sub txtCat_Change()
+    UpdatePreview
+End Sub
+
+Private Function SwatchAt(ByVal X As Single, ByVal Y As Single) As Long
+    Dim c As Long, r As Long
+    If X < 0 Or Y < 0 Then Exit Function
+    c = Int(X / CELL)
+    r = Int(Y / CELL)
+    If c > 4 Or r > 4 Then Exit Function
+    SwatchAt = r * 5 + c + 1
+End Function
+
+Private Sub lblHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim i As Long
+    If mMode <> MODE_COLOR Then Exit Sub
+    i = SwatchAt(X, Y)
+    If i > 0 Then lblHint.Caption = NVS_ColorName(i)
+End Sub
+
+Private Sub lblHit_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim i As Long, r As Long
+    Select Case mMode
+        Case MODE_COLOR
+            i = SwatchAt(X, Y)
+            If i > 0 Then SelectSwatch i
+        Case MODE_LIST
+            r = Int(Y / mRowH) + 1
+            If r >= 1 And r <= mListN Then SelectListRow r
+    End Select
+End Sub
+
+Private Sub lblHit_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
+    Select Case mMode
+        Case MODE_COLOR
+            If mColor >= 1 Then
+                mCancelled = False
+                Me.Hide
+            End If
+        Case MODE_LIST
+            If mListSel >= 1 Then
+                mAction = "change"
+                Me.Hide
+            End If
+    End Select
+End Sub
+
+' Pointer left the swatches: show the selected color's name again.
+Private Sub UserForm_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    If mMode <> MODE_COLOR Then Exit Sub
+    If mColor >= 1 Then lblHint.Caption = NVS_ColorName(mColor) Else lblHint.Caption = "Click a color"
+End Sub
+
+'==============================================================================
+' List window (Folder Colors, Save Locations): rows with Add / Change / Remove
+'==============================================================================
+
+' Returns "add", "change", "remove" or "close". SelectedRow says which row.
+Public Function ShowList(ByVal title As String, ByVal prompt As String, ByVal n As Long, _
+                         t1() As String, t2() As String, sw() As Long, _
+                         ByVal showSwatches As Boolean, ByVal emptyText As String) As String
+    Dim i As Long, y As Single, x As Single, lbl As MSForms.Label
+
+    mMode = MODE_LIST
+    mAction = "close"
+    mListN = n
+    mRowH = 32
+    Me.Caption = title
+    SizeForm 420, 292
+
+    Set lblPrompt = NewLabel(Me, 8, 6, 404, 26, prompt)
+    lblPrompt.WordWrap = True
+    Set fraRows = Me.Controls.Add("Forms.Frame.1")
+    With fraRows
+        .Left = 8
+        .Top = 34
+        .Width = 320
+        .Height = 250
+        .Caption = ""
+        .SpecialEffect = 2              ' sunken, like a list box
+        .BackColor = RGB(255, 255, 255)
+    End With
+
+    Set lblSel = NewBlock(fraRows, 0, 0, 316, mRowH, RGB(204, 232, 255))
+    lblSel.Visible = False
+    For i = 1 To n
+        y = (i - 1) * mRowH
+        x = 6
+        If showSwatches Then
+            Set lbl = NewBlock(fraRows, 6, y + 9, 14, 14, sw(i))
+            lbl.BorderStyle = 1
+            lbl.BorderColor = RGB(160, 160, 160)
+            x = 28
+        End If
+        Set lbl = NewLabel(fraRows, x, y + 3, 296 - x, 13, t1(i))
+        Set lbl = NewLabel(fraRows, x, y + 16, 296 - x, 13, t2(i))
+        lbl.ForeColor = RGB(96, 96, 96)
+    Next
+    If n = 0 Then
+        Set lbl = NewLabel(fraRows, 8, 8, 290, 40, emptyText)
+        lbl.WordWrap = True
+        lbl.ForeColor = RGB(96, 96, 96)
+    End If
+    If n * mRowH > fraRows.InsideHeight Then
+        fraRows.ScrollBars = 2          ' vertical
+        fraRows.ScrollHeight = n * mRowH + 2
+    End If
+    Set lblHit = NewLabel(fraRows, 0, 0, 316, IIf(n > 0, n * mRowH, 1), "")
+
+    Set btnAdd = NewButton(Me, 336, 34, 76, 22, "Add...")
+    Set btnChange = NewButton(Me, 336, 60, 76, 22, "Change...")
+    Set btnRemove = NewButton(Me, 336, 86, 76, 22, "Remove")
+    Set btnCancel = NewButton(Me, 336, 262, 76, 22, "Close")
+    btnCancel.Cancel = True
+    If n > 0 Then SelectListRow 1 Else UpdateListButtons
+
+    Me.Show
+    ShowList = mAction
+End Function
+
+Public Property Get SelectedRow() As Long
+    SelectedRow = mListSel
+End Property
+
+Private Sub SelectListRow(ByVal r As Long)
+    mListSel = r
+    lblSel.Top = (r - 1) * mRowH
+    lblSel.Visible = True
+    UpdateListButtons
+End Sub
+
+Private Sub UpdateListButtons()
+    btnChange.Enabled = (mListSel >= 1)
+    btnRemove.Enabled = (mListSel >= 1)
+End Sub
+
+Private Sub btnAdd_Click()
+    mAction = "add"
+    Me.Hide
+End Sub
+
+Private Sub btnChange_Click()
+    If mListSel < 1 Then Exit Sub
+    mAction = "change"
+    Me.Hide
+End Sub
+
+Private Sub btnRemove_Click()
+    If mListSel < 1 Then Exit Sub
+    mAction = "remove"
+    Me.Hide
+End Sub
+
+'==============================================================================
+' Rename Attachments window - one box per attachment
+'==============================================================================
+
+' names() holds the names without extension; edited in place. Returns False
+' if cancelled.
+Public Function RenameList(ByVal n As Long, names() As String, exts() As String) As Boolean
+    Dim i As Long, y As Single, x0 As Single, y0 As Single, listH As Single, rowsH As Single
+    Dim host As Object, lbl As MSForms.Label
+
+    mMode = MODE_RENAME
+    Me.Caption = "Rename Attachments"
+    rowsH = n * 24
+    listH = rowsH
+    If listH > 216 Then listH = 216
+    SizeForm 380, 34 + listH + 38
+
+    If n = 1 Then
+        Set lblPrompt = NewLabel(Me, 8, 8, 364, 24, "New name for the attachment (the extension stays the same):")
+    Else
+        Set lblPrompt = NewLabel(Me, 8, 8, 364, 24, "Change any of the names (the extensions stay the same). Tab moves to the next one:")
+    End If
+    lblPrompt.WordWrap = True
+
+    If rowsH > listH Then
+        Set fraRows = Me.Controls.Add("Forms.Frame.1")
+        With fraRows
+            .Left = 8
+            .Top = 34
+            .Width = 364
+            .Height = listH
+            .Caption = ""
+            .SpecialEffect = 0
+            .ScrollBars = 2             ' vertical
+            .ScrollHeight = rowsH + 4
+        End With
+        Set host = fraRows
+        x0 = 0
+        y0 = 2
+    Else
+        Set host = Me
+        x0 = 8
+        y0 = 34
+    End If
+
+    ReDim mBoxes(1 To n)
+    For i = 1 To n
+        y = y0 + (i - 1) * 24
+        Set mBoxes(i) = NewTextBox(host, x0, y, 288, 19)
+        mBoxes(i).Text = names(i)
+        Set lbl = NewLabel(host, x0 + 292, y + 3, 60, 14, exts(i))
+        lbl.ForeColor = RGB(96, 96, 96)
+    Next
+
+    Set btnOK = NewButton(Me, 222, 34 + listH + 10, 72, 22, "Rename")
+    btnOK.Default = True
+    Set btnCancel = NewButton(Me, 300, 34 + listH + 10, 72, 22, "Cancel")
+    btnCancel.Cancel = True
+
+    Me.Show
+    If mCancelled Then Exit Function
+    For i = 1 To n
+        names(i) = mBoxes(i).Text
+    Next
+    RenameList = True
+End Function
+
+'==============================================================================
+' Progress window (shown while NVS_mail colors lots of mail)
+'==============================================================================
+
+Public Sub ProgressStart(ByVal title As String, ByVal text As String)
+    Dim back As MSForms.Label
+    mMode = MODE_PROGRESS
+    mCancelRequested = False
+    Me.Caption = "NVS_mail"
+    SizeForm 300, 94
+
+    Set lblPrompt = NewLabel(Me, 10, 8, 280, 14, title)
+    Set back = NewBlock(Me, 10, 28, 280, 10, RGB(225, 225, 225))
+    Set lblBar = NewBlock(Me, 10, 28, 1, 10, RGB(0, 120, 212))
+    mBarW = 280
+    Set lblHint = NewLabel(Me, 10, 44, 280, 13, text)
+    lblHint.ForeColor = RGB(96, 96, 96)
+    Set btnCancel = NewButton(Me, 220, 64, 70, 22, "Cancel")
+
+    Me.Show vbModeless
+    Me.Repaint
+    DoEvents
+End Sub
+
+' Cheap to call often: repaints (and lets Outlook breathe) a few times a second.
+Public Sub ProgressUpdate(ByVal done As Long, ByVal total As Long, ByVal text As String)
+    Dim t As Single
+    t = Timer
+    If t >= mLastPaint And t - mLastPaint < 0.15 Then Exit Sub
+    mLastPaint = t
+    If total > 0 Then
+        If done >= total Then lblBar.Width = mBarW Else lblBar.Width = 1 + (mBarW - 1) * done / total
+    End If
+    lblHint.Caption = text
+    Me.Repaint
+    DoEvents
+End Sub
+
+Public Property Get CancelRequested() As Boolean
+    CancelRequested = mCancelRequested
+End Property
+
+Public Sub ProgressEnd()
+    On Error Resume Next
+    Unload Me
+End Sub
