@@ -52,6 +52,8 @@ Private mSeenCount As Long
 Private mTranscript As String
 Private mStart As Date
 Private mLastAdd As Double       ' seconds into the call when text was last added
+Private mShown As String         ' what the window shows, rebuilt only when the transcript changes
+Private mShownDirty As Boolean
 
 '==============================================================================
 ' The button
@@ -81,6 +83,7 @@ Public Sub NVS_TranscribeCall()
     ReDim mSeen(1 To 64)
     mSeenCount = 0
     mTranscript = ""
+    mShownDirty = True
     lastTxt = CaptionText()
     RememberScreen lastTxt
 
@@ -228,7 +231,7 @@ End Function
 '==============================================================================
 
 Private Sub TakeSentences(ByVal txt As String, ByVal settled As Boolean, ByVal takeAll As Boolean)
-    Dim s As Collection, n As Long, take As Long, i As Long
+    Dim s As Collection, norms() As String, n As Long, take As Long, i As Long
     Set s = Sentences(txt)
     n = s.Count
     If n = 0 Then Exit Sub
@@ -241,27 +244,30 @@ Private Sub TakeSentences(ByVal txt As String, ByVal settled As Boolean, ByVal t
         take = n - 2
     End If
     If take < 1 Then Exit Sub
-    For i = FirstNew(s, take) To take
-        AddToTranscript s(i)
+    ReDim norms(1 To take)                          ' simplified once per read
+    For i = 1 To take
+        norms(i) = Norm(s(i))
+    Next
+    For i = FirstNew(norms, take) To take
+        AddToTranscript s(i), norms(i)
     Next
 End Sub
 
-' Position (in s) of the first sentence that isn't in the transcript yet:
+' Position of the first sentence on screen that isn't in the transcript yet:
 ' finds where the screen picks up from the sentences already taken.
-Private Function FirstNew(ByVal s As Collection, ByVal take As Long) As Long
-    Dim p As Long, j As Long, lo As Long, ok As Boolean, first As String
+Private Function FirstNew(norms() As String, ByVal take As Long) As Long
+    Dim p As Long, j As Long, lo As Long, ok As Boolean
     FirstNew = 1
     If mSeenCount = 0 Then Exit Function
-    first = Norm(s(1))
     lo = mSeenCount - 80
     If lo < 1 Then lo = 1
     For p = mSeenCount To lo Step -1
         ' The top sentence on screen may be cut off at the front.
-        If EndsWithText(mSeen(p), first) Then
+        If EndsWithText(mSeen(p), norms(1)) Then
             ok = True
             For j = 2 To take
                 If p + j - 1 > mSeenCount Then Exit For
-                If Norm(s(j)) <> mSeen(p + j - 1) Then
+                If norms(j) <> mSeen(p + j - 1) Then
                     ok = False
                     Exit For
                 End If
@@ -274,7 +280,7 @@ Private Function FirstNew(ByVal s As Collection, ByVal take As Long) As Long
     Next
 End Function
 
-Private Sub AddToTranscript(ByVal sentence As String)
+Private Sub AddToTranscript(ByVal sentence As String, ByVal simplified As String)
     Dim t As Double
     t = Elapsed()
     If mTranscript = "" Then
@@ -285,7 +291,8 @@ Private Sub AddToTranscript(ByVal sentence As String)
         mTranscript = mTranscript & " " & sentence
     End If
     mLastAdd = t
-    Remember Norm(sentence)
+    mShownDirty = True
+    Remember simplified
 End Sub
 
 Private Sub RememberScreen(ByVal txt As String)
@@ -426,11 +433,20 @@ Private Function DocumentsFolder() As String
     DocumentsFolder = p
 End Function
 
-' The latest part of the transcript, sized to fit the window.
+' What the window shows; only worked out again when the transcript changes.
 Private Function RecentText() As String
+    If mShownDirty Then
+        mShown = BuildRecentText()
+        mShownDirty = False
+    End If
+    RecentText = mShown
+End Function
+
+' The latest part of the transcript, sized to fit the window.
+Private Function BuildRecentText() As String
     Dim paras() As String, i As Long, rows As Long, out As String
     If mTranscript = "" Then
-        RecentText = "(Waiting for someone to speak...)"
+        BuildRecentText = "(Waiting for someone to speak...)"
         Exit Function
     End If
     paras = Split(mTranscript, vbCrLf & vbCrLf)
@@ -440,7 +456,7 @@ Private Function RecentText() As String
         If out = "" Then out = paras(i) Else out = paras(i) & vbCrLf & vbCrLf & out
     Next
     If Len(out) > 1100 Then out = "..." & Right$(out, 1100)
-    RecentText = out
+    BuildRecentText = out
 End Function
 
 Private Function StatusLine(ByVal t As Double, ByVal filePath As String) As String

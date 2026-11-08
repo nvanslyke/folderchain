@@ -6,6 +6,7 @@
 |---|---|
 | **File to Chain** (`NVS_FileToChainFolder`) | One click: moves the email into the folder the rest of its chain is filed in. |
 | **Move (chain)** (`NVS_MoveToFolder`) | A compact Move Items window, like Outlook's, that **opens on the chain's folder**. It has a folder tree, a search box and **New...**. |
+| **Undo Move** (`NVS_UndoMove`) | Puts back the emails moved by the last File to Chain or Move (chain). Click again to go further back. |
 | **Save Email + Attachments** (`NVS_SaveEmailAndAttachments`) | Opens Windows' standard Save As window at that chain's save location. The email (under its usual name) and all its attachments are saved in the folder you pick. |
 | **Save Locations** (`NVS_SaveLocations`) | Sets where Save opens: a base folder, plus a folder for any Outlook folder you like. |
 | **Set Folder Color** (`NVS_SetFolderColor`) | Picks a color for a folder from real color swatches. Chains filed in that folder **or any of its subfolders** get that color, in your Inbox and Sent Items too. |
@@ -85,6 +86,7 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 |---|---|
 | `NVS_FileToChainFolder` | File to Chain |
 | `NVS_MoveToFolder` | Move (chain) |
+| `NVS_UndoMove` | Undo Move |
 | `NVS_SaveEmailAndAttachments` | Save Email + Attachments |
 | `NVS_ScheduleMeetingWithChain` | Meeting with Chain |
 | `NVS_SetFolderColor` | Set Folder Color |
@@ -93,11 +95,11 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 | `NVS_RenameAttachments` | Rename Attachments (works while replying in the reading pane) |
 | `NVS_TranscribeCall` | Transcribe Call (only if you added file 4) |
 
-Only NVS_mail's button macros appear in that list (12, or 13 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
+Only NVS_mail's button macros appear in that list (13, or 14 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
 
 **Email window** (for Rename Attachments, and Save/Meeting on an open email): open any email or a new message, right-click its ribbon, choose **Customize the Ribbon**, and add the same macros to a new `NVS_mail` group on the **Message** tab.
 
-**Keyboard shortcuts:** macros you add to the **Quick Access Toolbar** get shortcuts. The first button is Alt+1, the second Alt+2, and so on. Putting File to Chain first gives you one-key filing.
+**Keyboard shortcuts:** macros you add to the **Quick Access Toolbar** get shortcuts. The first button is Alt+1, the second Alt+2, and so on. Put **File to Chain** first and **Undo Move** second, and Alt+1 files an email while Alt+2 takes it back.
 
 ### 7. Try it
 
@@ -110,7 +112,7 @@ Only NVS_mail's button macros appear in that list (12, or 13 with file 4). All t
 
 Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**, and paste the new file. For the form, right-click it and choose View Code first. Then **Debug > Compile**, sign again, save, and restart Outlook. Your folder colors and save locations are kept, since they're stored in the registry rather than in the code.
 
-**Coming from the version with the `NVS_mail_Dialog` form:** replace files 1 and 2. ThisOutlookSession (file 3) hasn't changed.
+**Coming from the version with the `NVS_mail_Dialog` form:** replace files 1 and 2, plus file 4 if you use it. ThisOutlookSession (file 3) hasn't changed.
 
 **Coming from the version with the `NVS_mail_FolderPicker` form:**
 
@@ -134,6 +136,8 @@ Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**
 * Select an email, or open one, and click the button. Windows' standard **Save As** window opens, with your pinned folders on the left as usual. It opens at:
   1. the **save location of the chain's Outlook folder**, or of the nearest folder above it that has one; otherwise
   2. your **base folder**.
+* The window lists **every file** in each folder, not just emails, so you can see what's already been saved there.
+* The cursor starts in the folders rather than the file name box, like pressing Shift+Tab twice, so you can move around with the keyboard straight away. To start in the file name box instead, set `NVS_SAVE_START_IN_FOLDERS = False`.
 * Go into the exact subfolder you want and click **Save**. The email is saved there as a `.msg` file under the same name Outlook would give it (its subject), with all its attachments next to it under their own names. There are no other questions.
 * If a file with that name is already there, Windows asks whether to replace it. If you say yes, matching attachments are replaced too. Otherwise attachments get `(2)` added to their names rather than overwriting anything.
 * Pictures embedded in the email body, such as signature logos, are skipped. Set `NVS_SKIP_INLINE_IMAGES = False` to save them too.
@@ -153,6 +157,10 @@ To choose a Windows folder, the same Save As window opens. Go into the folder yo
 
 * **File to Chain** moves the selected email(s) there straight away, with no dialog. If the chain hasn't been filed anywhere yet, the Move Items window opens instead. If you select several emails from different chains, each goes to its own chain's folder.
 * **Move (chain)** opens the Move Items window with the chain's folder already selected. Press **Enter** (or click OK) to move there.
+* **Undo Move** puts the emails from the last File to Chain or Move (chain) back where they were, and their colors follow. Click it again to go further back, up to 20 moves.
+  * Outlook's own **Ctrl+Z** only undoes moves made with Outlook's own buttons, so use Undo Move for NVS_mail's moves.
+  * VBA has no safe way to take over Ctrl+Z, so Undo Move gets its own shortcut instead: see the Quick Access Toolbar tip in [step 6](#6-add-the-nvs_mail-buttons-to-the-ribbon).
+  * The undo list lasts until Outlook closes.
 
 **The Move Items window** works like Outlook's own, plus a search box:
 
@@ -258,6 +266,7 @@ These are at the top of the **NVS_mail** module (file 1). Change the value, then
 | `NVS_AUTO_COLOR` | `True` | Color mail automatically as it arrives, is sent or is filed. |
 | `NVS_RECOLOR_DAYS_BACK` | `180` | How far back coloring existing mail and `NVS_RecolorInbox` look. `0` means all mail. |
 | `NVS_SKIP_INLINE_IMAGES` | `True` | When saving, skip pictures embedded in the body. |
+| `NVS_SAVE_START_IN_FOLDERS` | `True` | When the Save As window opens, put the cursor in the folders instead of the file name box. |
 | `NVS_SUBFOLDER_PER_EMAIL` | `True` | When saving several emails at once, give each one its own subfolder. |
 | `NVS_MEETING_SUBJECT_PREFIX` | `""` | Text added before the meeting subject. |
 | `NVS_CC_AS_OPTIONAL` | `True` | People only on CC become optional attendees. |

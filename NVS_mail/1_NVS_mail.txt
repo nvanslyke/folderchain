@@ -46,6 +46,10 @@ Private Const NVS_RECOLOR_DAYS_BACK As Long = 180
 ' logos and so on) and only save real attachments.
 Private Const NVS_SKIP_INLINE_IMAGES As Boolean = True
 
+' Save Email + Attachments: when the Save As window opens, put the cursor in
+' the folders (as two Shift+Tabs would) instead of the file name box.
+Private Const NVS_SAVE_START_IN_FOLDERS As Boolean = True
+
 ' Save Email + Attachments with several emails selected: True = each email
 ' and its attachments go in their own subfolder (named like the email).
 Private Const NVS_SUBFOLDER_PER_EMAIL As Boolean = True
@@ -109,6 +113,16 @@ End Type
 Private Declare PtrSafe Function GetSaveFileNameW Lib "comdlg32.dll" (ByRef ofn As NvsOpenFileName) As Long
 Private Declare PtrSafe Function CommDlgExtendedError Lib "comdlg32.dll" () As Long
 Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
+Private Declare PtrSafe Function GetWindowTextW Lib "user32" (ByVal hWnd As LongPtr, ByVal lpString As LongPtr, _
+    ByVal nMaxCount As Long) As Long
+Private Declare PtrSafe Function SetTimer Lib "user32" (ByVal hWnd As LongPtr, ByVal nIDEvent As LongPtr, _
+    ByVal uElapse As Long, ByVal lpTimerFunc As LongPtr) As LongPtr
+Private Declare PtrSafe Function KillTimer Lib "user32" (ByVal hWnd As LongPtr, ByVal nIDEvent As LongPtr) As Long
+Private Declare PtrSafe Sub keybd_event Lib "user32" (ByVal bVk As Byte, ByVal bScan As Byte, _
+    ByVal dwFlags As Long, ByVal dwExtraInfo As LongPtr)
+Private Const VK_SHIFT As Byte = &H10
+Private Const VK_TAB As Byte = &H9
+Private Const KEYEVENTF_KEYUP As Long = &H2
 
 ' One email of a chain, read from Outlook's conversation table.
 Private Type NvsRow
@@ -134,6 +148,16 @@ Private mFolderInfo As Object    ' folder key -> Array(filing, category, paint, 
 Private mInfoStamp As Single     ' when mFolderInfo was started (Timer)
 Private mRecent As Object        ' ConversationID -> Timer: chains recolored a moment ago
 Private mSaveCount As Long       ' emails recolored (for the progress window)
+
+' Save As window: moving the cursor to the folders once it's open
+Private mDlgTimer As LongPtr
+Private mDlgTitle As String
+Private mDlgTicks As Long
+Private mDlgSeen As Long
+
+' Undo Move: what each NVS_mail move did (newest last), and the one in progress
+Private mUndo As Collection
+Private mUndoStep As Collection
 
 ' Folder list used by the Move Items window (NVS_mail_Dialog).
 Public gNVS_FolderCount As Long
@@ -189,6 +213,7 @@ Public Sub NVS_FileToChainFolder()
     Dim moved As New Collection, orphans As New Collection, already As Long
     Dim lastTarget As Outlook.Folder, m As Object
 
+    BeginUndoStep
     gNVS_Busy = True
     For i = 1 To n
         If targets(i) Is Nothing Then
@@ -196,10 +221,7 @@ Public Sub NVS_FileToChainFolder()
         ElseIf NVS_SameFolder(items(i).Parent, targets(i)) Then
             already = already + 1
         Else
-            Set m = Nothing
-            On Error Resume Next
-            Set m = items(i).Move(targets(i))
-            On Error GoTo 0
+            Set m = MoveItem(items(i), targets(i))
             If Not m Is Nothing Then
                 moved.Add m
                 Set lastTarget = targets(i)
@@ -223,6 +245,7 @@ Public Sub NVS_FileToChainFolder()
         End If
     End If
 
+    EndUndoStep
     If Not lastTarget Is Nothing Then NVS_SetLastMoveFolder lastTarget
     RecolorMoved moved
 
@@ -256,9 +279,11 @@ Public Sub NVS_MoveToFolder()
     If target Is Nothing Then Exit Sub
 
     Dim moved As New Collection
+    BeginUndoStep
     gNVS_Busy = True
     MoveAll items, target, moved
     gNVS_Busy = False
+    EndUndoStep
     NVS_SetLastMoveFolder target
     RecolorMoved moved
 End Sub
@@ -285,17 +310,80 @@ Private Sub RecolorMoved(ByVal moved As Collection)
     gNVS_Busy = False
 End Sub
 
+' Puts back the emails moved by the last File to Chain or Move (chain). Click
+' again to go further back (up to 20 moves). Outlook's own Ctrl+Z only undoes
+' moves made with Outlook's own buttons.
+Public Sub NVS_UndoMove()
+    Dim stp As Collection, i As Long, rec As Variant, it As Object, f As Object, m As Object
+    Dim moved As New Collection, missed As Long
+
+    If mUndo Is Nothing Then GoTo NothingToUndo
+    If mUndo.Count = 0 Then GoTo NothingToUndo
+    Set stp = mUndo(mUndo.Count)
+    mUndo.Remove mUndo.Count
+
+    ResetCaches
+    gNVS_Busy = True
+    For i = stp.Count To 1 Step -1
+        rec = stp(i)
+        Set it = Nothing
+        Set f = Nothing
+        Set m = Nothing
+        On Error Resume Next
+        Set it = Application.Session.GetItemFromID(rec(0), rec(1))
+        Set f = Application.Session.GetFolderFromID(rec(2), rec(3))
+        If Not it Is Nothing And Not f Is Nothing Then Set m = it.Move(f)
+        On Error GoTo 0
+        If m Is Nothing Then missed = missed + 1 Else moved.Add m
+    Next
+    gNVS_Busy = False
+    RecolorMoved moved
+    If missed > 0 Then
+        MsgBox missed & IIf(missed = 1, " email", " emails") & " couldn't be put back - " & _
+               IIf(missed = 1, "it may have been", "they may have been") & " moved or deleted since.", _
+               vbInformation, NVS_APP
+    End If
+    Exit Sub
+NothingToUndo:
+    MsgBox "There's no NVS_mail move to undo.", vbInformation, NVS_APP
+End Sub
+
 Private Sub MoveAll(ByVal items As Collection, ByVal target As Outlook.Folder, ByVal moved As Collection)
     Dim it As Object, m As Object
     For Each it In items
         If Not NVS_SameFolder(it.Parent, target) Then
-            Set m = Nothing
-            On Error Resume Next
-            Set m = it.Move(target)
-            On Error GoTo 0
+            Set m = MoveItem(it, target)
             If Not m Is Nothing Then moved.Add m
         End If
     Next
+End Sub
+
+' Moves one email and remembers where it came from, for Undo Move.
+Private Function MoveItem(ByVal it As Object, ByVal target As Outlook.Folder) As Object
+    Dim fromID As String, fromStore As String, m As Object
+    On Error Resume Next
+    fromID = it.Parent.EntryID
+    fromStore = it.Parent.StoreID
+    Set m = it.Move(target)
+    If m Is Nothing Then Exit Function
+    If Not mUndoStep Is Nothing And fromID <> "" Then
+        mUndoStep.Add Array(m.EntryID, target.StoreID, fromID, fromStore)
+    End If
+    Set MoveItem = m
+End Function
+
+Private Sub BeginUndoStep()
+    Set mUndoStep = New Collection
+End Sub
+
+Private Sub EndUndoStep()
+    If mUndoStep Is Nothing Then Exit Sub
+    If mUndoStep.Count > 0 Then
+        If mUndo Is Nothing Then Set mUndo = New Collection
+        mUndo.Add mUndoStep
+        If mUndo.Count > 20 Then mUndo.Remove 1
+    End If
+    Set mUndoStep = Nothing
 End Sub
 
 '==============================================================================
@@ -697,16 +785,15 @@ End Sub
 
 Private Function SaveAttachments(ByVal it As Object, ByVal dest As String, ByVal overwrite As Boolean, _
                                  ByRef errs As String) As Long
-    Dim html As String, i As Long, att As Outlook.Attachment, fn As String
-    Dim b As String, ext As String, n As Long, p As String
+    Dim atts As Object, att As Outlook.Attachment, html As String, htmlLoaded As Boolean
+    Dim i As Long, fn As String, b As String, ext As String, n As Long, p As String
 
-    On Error Resume Next
-    html = it.HTMLBody
-    On Error GoTo 0
-
-    For i = 1 To it.Attachments.Count
-        Set att = it.Attachments.Item(i)
-        If NVS_SKIP_INLINE_IMAGES And NVS_IsInlineAttachment(att, html) Then GoTo NextAtt
+    Set atts = it.Attachments
+    For i = 1 To atts.Count
+        Set att = atts.Item(i)
+        If NVS_SKIP_INLINE_IMAGES Then
+            If NVS_IsInlineAttachment(att, it, html, htmlLoaded) Then GoTo NextAtt
+        End If
 
         fn = ""
         On Error Resume Next
@@ -798,7 +885,8 @@ Private Function PickWindowsFolder(ByVal title As String, ByVal startDir As Stri
 End Function
 
 ' Windows' standard Save As window (your pinned folders on the left), opened
-' on startDir with fileName filled in. Returns the full path chosen, or "".
+' on startDir with fileName filled in. Every file in a folder is listed, so
+' you can see what's already been saved. Returns the full path chosen, or "".
 Private Function WindowsSaveDialog(ByVal title As String, ByVal startDir As String, _
                                    ByVal fileName As String, ByVal saveMode As Boolean) As String
     Dim ofn As NvsOpenFileName, sFile As String, sFilter As String, sTitle As String, sExt As String
@@ -809,12 +897,9 @@ Private Function WindowsSaveDialog(ByVal title As String, ByVal startDir As Stri
     ' The full path goes in the file box: that makes Windows open this folder
     ' rather than the last one used.
     sFile = startDir & fileName & String$(2048, vbNullChar)
-    If saveMode Then
-        sFilter = "Outlook Message (*.msg)" & vbNullChar & "*.msg" & vbNullChar & vbNullChar
-        sExt = "msg"
-    Else
-        sFilter = "Folders" & vbNullChar & "*.nvs-folders-only" & vbNullChar & vbNullChar
-    End If
+    sFilter = "All files (*.*)" & vbNullChar & "*.*" & vbNullChar & _
+              "Outlook messages (*.msg)" & vbNullChar & "*.msg" & vbNullChar & vbNullChar
+    If saveMode Then sExt = "msg"
     sTitle = title
 
     ofn.lStructSize = LenB(ofn)
@@ -830,7 +915,9 @@ Private Function WindowsSaveDialog(ByVal title As String, ByVal startDir As Stri
         ofn.lpstrDefExt = StrPtr(sExt)
     End If
 
+    If NVS_SAVE_START_IN_FOLDERS Then StartDialogTimer title
     r = GetSaveFileNameW(ofn)
+    StopDialogTimer
     If r <> 0 Then
         k = InStr(sFile, vbNullChar)
         If k > 0 Then WindowsSaveDialog = Left$(sFile, k - 1) Else WindowsSaveDialog = sFile
@@ -875,6 +962,46 @@ Private Function DocumentsFolder() As String
     DocumentsFolder = p
 End Function
 
+' Runs every 100 ms while the Save As window opens. Once it has been up for a
+' moment, it moves the cursor from the file name box to the folders - the two
+' Shift+Tabs you'd otherwise press - and stops.
+Public Sub NVS_SaveDialogTimer(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal idEvent As LongPtr, _
+                               ByVal dwTime As Long)
+    Dim fg As LongPtr, buf As String, n As Long
+    On Error Resume Next
+    mDlgTicks = mDlgTicks + 1
+    fg = GetForegroundWindow()
+    buf = String$(300, vbNullChar)
+    n = GetWindowTextW(fg, StrPtr(buf), 300)
+    If n > 0 And Left$(buf, n) = mDlgTitle Then
+        mDlgSeen = mDlgSeen + 1
+        If mDlgSeen >= 2 Then
+            StopDialogTimer
+            keybd_event VK_SHIFT, 0, 0, 0
+            keybd_event VK_TAB, 0, 0, 0
+            keybd_event VK_TAB, 0, KEYEVENTF_KEYUP, 0
+            keybd_event VK_TAB, 0, 0, 0
+            keybd_event VK_TAB, 0, KEYEVENTF_KEYUP, 0
+            keybd_event VK_SHIFT, 0, KEYEVENTF_KEYUP, 0
+        End If
+    ElseIf mDlgTicks > 50 Then
+        StopDialogTimer                             ' the window never came up
+    End If
+End Sub
+
+Private Sub StartDialogTimer(ByVal title As String)
+    StopDialogTimer
+    mDlgTitle = title
+    mDlgTicks = 0
+    mDlgSeen = 0
+    mDlgTimer = SetTimer(0, 0, 100, AddressOf NVS_SaveDialogTimer)
+End Sub
+
+Private Sub StopDialogTimer()
+    If mDlgTimer <> 0 Then KillTimer 0, mDlgTimer
+    mDlgTimer = 0
+End Sub
+
 '==============================================================================
 ' Rename attachments on a draft
 '==============================================================================
@@ -882,7 +1009,8 @@ End Function
 ' Opens a window listing every file attached to the email you're writing.
 ' Change any of the names (the extension is kept) and click Rename.
 Public Sub NVS_RenameAttachments()
-    Dim m As Outlook.MailItem, html As String, i As Long, n As Long, total As Long
+    Dim m As Outlook.MailItem, html As String, htmlLoaded As Boolean, i As Long, n As Long, total As Long
+    Dim attList As Object, a As Outlook.Attachment
     Dim atts() As Outlook.Attachment, bases() As String, exts() As String, newBases() As String
     Dim dlg As NVS_mail_Dialog, ok As Boolean
 
@@ -893,20 +1021,18 @@ Public Sub NVS_RenameAttachments()
         Exit Sub
     End If
 
-    On Error Resume Next
-    html = m.HTMLBody
-    On Error GoTo 0
-
-    total = m.Attachments.Count
+    Set attList = m.Attachments
+    total = attList.Count
     ReDim atts(1 To total + 1)
     ReDim bases(1 To total + 1)
     ReDim exts(1 To total + 1)
     For i = 1 To total
-        If m.Attachments.Item(i).Type = olByValue Then
-            If Not NVS_IsInlineAttachment(m.Attachments.Item(i), html) Then
+        Set a = attList.Item(i)
+        If a.Type = olByValue Then
+            If Not NVS_IsInlineAttachment(a, m, html, htmlLoaded) Then
                 n = n + 1
-                Set atts(n) = m.Attachments.Item(i)
-                NVS_SplitExt atts(n).FileName, bases(n), exts(n)
+                Set atts(n) = a
+                NVS_SplitExt a.FileName, bases(n), exts(n)
             End If
         End If
     Next
@@ -1455,7 +1581,8 @@ End Function
 ' Every email of a conversation from its table - one quick lookup instead of
 ' opening each email. 0 if Outlook can't provide the table.
 Private Function ReadConversationRows(ByVal conv As Object, ByRef rows() As NvsRow) As Long
-    Dim tbl As Object, rw As Object, v As Variant, n As Long, cCat As Long, cTime As Long, cPar As Long
+    Dim tbl As Object, rw As Object, v As Variant, n As Long, ok As Boolean
+    Dim cID As Long, cClass As Long, cCreated As Long, cCat As Long, cTime As Long, cPar As Long
 
     On Error GoTo Failed
     Set tbl = conv.GetTable
@@ -1465,26 +1592,42 @@ Private Function ReadConversationRows(ByVal conv As Object, ByRef rows() As NvsR
     cTime = tbl.Columns.Count
     tbl.Columns.Add PR_PARENT_ENTRYID
     cPar = tbl.Columns.Count
+    ' Column positions are looked up once, not by name on every row.
+    cID = ColumnIndex(tbl, "EntryID")
+    cClass = ColumnIndex(tbl, "MessageClass")
+    cCreated = ColumnIndex(tbl, "CreationTime")
+    If cID = 0 Or cClass = 0 Or cCreated = 0 Then GoTo Failed
 
     ReDim rows(1 To 16)
     Do Until tbl.EndOfTable
         Set rw = tbl.GetNextRow
         n = n + 1
         If n > UBound(rows) Then ReDim Preserve rows(1 To 2 * UBound(rows))
-        rows(n).EntryID = CStr(rw("EntryID"))
+        rows(n).EntryID = CStr(rw(cID))
         rows(n).FolderKey = rw.BinaryToString(cPar)
         rows(n).Categories = CellText(rw(cCat))
         v = rw(cTime)
-        rows(n).Stamp = rw("CreationTime")
-        If IsDate(v) Then
-            If Year(v) < 4000 Then rows(n).Stamp = v
-        End If
-        rows(n).IsMail = IsMailClass(CStr(rw("MessageClass")))
+        ok = False
+        If IsDate(v) Then ok = (Year(v) < 4000)
+        If ok Then rows(n).Stamp = v Else rows(n).Stamp = rw(cCreated)
+        rows(n).IsMail = IsMailClass(CStr(rw(cClass)))
     Loop
     ReadConversationRows = n
     Exit Function
 Failed:
     ReadConversationRows = 0
+End Function
+
+Private Function ColumnIndex(ByVal tbl As Object, ByVal colName As String) As Long
+    Dim i As Long, cols As Object
+    On Error Resume Next
+    Set cols = tbl.Columns
+    For i = 1 To cols.Count
+        If StrComp(cols.Item(i).Name, colName, vbTextCompare) = 0 Then
+            ColumnIndex = i
+            Exit Function
+        End If
+    Next
 End Function
 
 ' Same as ReadChain, by opening each email of the conversation.
@@ -1511,15 +1654,21 @@ Private Function IsMailClass(ByVal mc As String) As Boolean
 End Function
 
 ' Folder key of the newest email in the chain that sits in a filing folder,
-' ignoring the email excludeID (use that when deciding where to file it).
+' ignoring the email excludeID (in folder excludeFolder) - use that when
+' deciding where to file that email.
 Private Function ChainKey(rows() As NvsRow, ByVal n As Long, ByVal sid As String, _
-                          ByVal excludeID As String) As String
-    Dim i As Long, best As String, bestT As Date, info As Variant
+                          ByVal excludeID As String, Optional ByVal excludeFolder As String = "") As String
+    Dim i As Long, best As String, bestT As Date, info As Variant, skip As Boolean
     For i = 1 To n
         If rows(i).IsMail Then
-            If excludeID = "" Or Not SameID(rows(i).EntryID, excludeID) Then
-                info = FolderInfo(rows(i).FolderKey, sid)
-                If info(0) Then
+            info = FolderInfo(rows(i).FolderKey, sid)
+            If info(0) Then
+                skip = False
+                If excludeID <> "" Then
+                    ' Only an email in the same folder can be the one excluded.
+                    If excludeFolder = "" Or info(3) = excludeFolder Then skip = SameID(rows(i).EntryID, excludeID)
+                End If
+                If Not skip Then
                     If best = "" Or rows(i).Stamp > bestT Then
                         best = rows(i).FolderKey
                         bestT = rows(i).Stamp
@@ -1571,14 +1720,16 @@ End Function
 ' The folder the chain is filed in: the folder of its newest email that sits
 ' in a filing folder. Nothing if the chain isn't filed anywhere.
 Private Function NVS_FindChainFolder(ByVal item As Object, ByVal excludeSelf As Boolean) As Outlook.Folder
-    Dim rows() As NvsRow, n As Long, sid As String, key As String, excl As String, info As Variant
+    Dim rows() As NvsRow, n As Long, sid As String, key As String, excl As String, exclFolder As String
+    Dim info As Variant
     If excludeSelf Then
         On Error Resume Next
         excl = item.EntryID
+        exclFolder = item.Parent.EntryID
         On Error GoTo 0
     End If
     n = ReadChain(item, rows, sid)
-    key = ChainKey(rows, n, sid, excl)
+    key = ChainKey(rows, n, sid, excl, exclFolder)
     If key = "" Then Exit Function
     info = FolderInfo(key, sid)
     On Error Resume Next
@@ -2395,14 +2546,24 @@ Private Function NVS_UniquePath(ByVal folder As String, ByVal baseName As String
     NVS_UniquePath = candidate
 End Function
 
-' True for pictures embedded in the body (signature logos etc.).
-Private Function NVS_IsInlineAttachment(ByVal att As Outlook.Attachment, ByVal htmlBody As String) As Boolean
+' True for pictures embedded in the body (signature logos etc.). The email's
+' body is only read (once, into html) when an attachment could be one.
+Private Function NVS_IsInlineAttachment(ByVal att As Outlook.Attachment, ByVal it As Object, _
+                                        ByRef html As String, ByRef htmlLoaded As Boolean) As Boolean
     Dim cid As String, hidden As Boolean
     On Error Resume Next
     hidden = att.PropertyAccessor.GetProperty(PR_ATTACHMENT_HIDDEN)
-    If hidden Then NVS_IsInlineAttachment = True: Exit Function
+    If hidden Then
+        NVS_IsInlineAttachment = True
+        Exit Function
+    End If
     cid = att.PropertyAccessor.GetProperty(PR_ATTACH_CONTENT_ID)
-    If cid <> "" And htmlBody <> "" Then
-        If InStr(1, htmlBody, "cid:" & cid, vbTextCompare) > 0 Then NVS_IsInlineAttachment = True
+    If cid = "" Then Exit Function
+    If Not htmlLoaded Then
+        html = it.HTMLBody
+        htmlLoaded = True
+    End If
+    If html <> "" Then
+        If InStr(1, html, "cid:" & cid, vbTextCompare) > 0 Then NVS_IsInlineAttachment = True
     End If
 End Function

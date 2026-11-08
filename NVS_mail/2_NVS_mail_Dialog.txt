@@ -412,16 +412,6 @@ Private Sub LayoutFolders()
     End If
 End Sub
 
-Private Function IsShown(ByVal i As Long) As Boolean
-    Dim p As Long
-    p = gNVS_FolderParent(i)
-    Do While p >= 0
-        If Not mExpanded.Exists(gNVS_FolderID(p)) Then Exit Function
-        p = gNVS_FolderParent(p)
-    Loop
-    IsShown = True
-End Function
-
 Private Function RowText(ByVal i As Long) As String
     Dim g As String
     If gNVS_FolderKids(i) > 0 Then
@@ -434,23 +424,32 @@ End Function
 
 ' Refills the list: the folder tree, or the folders matching Search.
 Private Sub RefreshFolders(ByVal scrollToSel As Boolean)
-    Dim f As String, i As Long, n As Long, arr() As Variant, selRow As Long, topRow As Long
+    Dim f As String, i As Long, n As Long, arr() As Variant, selRow As Long, topRow As Long, skipBelow As Long
 
     f = Trim$(txtFilter.Text)
     ReDim arr(0 To gNVS_FolderCount)
     ReDim mRows(0 To gNVS_FolderCount)
+    skipBelow = -1
     For i = 0 To gNVS_FolderCount - 1
         If f = "" Then
-            If IsShown(i) Then
-                arr(n) = RowText(i)
-                mRows(n) = i
-                n = n + 1
+            ' Folders are listed parent first, so everything deeper than a closed
+            ' folder - up to the next folder at its level - is hidden.
+            If skipBelow >= 0 Then
+                If gNVS_FolderDepth(i) > skipBelow Then GoTo NextFolder
+                skipBelow = -1
+            End If
+            arr(n) = RowText(i)
+            mRows(n) = i
+            n = n + 1
+            If gNVS_FolderKids(i) > 0 Then
+                If Not mExpanded.Exists(gNVS_FolderID(i)) Then skipBelow = gNVS_FolderDepth(i)
             End If
         ElseIf InStr(1, gNVS_FolderPath(i), f, vbTextCompare) > 0 Then
             arr(n) = gNVS_FolderPath(i)
             mRows(n) = i
             n = n + 1
         End If
+NextFolder:
     Next
 
     topRow = lstFolders.TopIndex
