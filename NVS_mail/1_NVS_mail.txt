@@ -18,6 +18,9 @@
 ' Extras (ribbon, or run with Alt+F8):
 '   NVS_RemoveFolderColor  NVS_RecolorSelected  NVS_RecolorInbox
 '   NVS_ApplyRowColorsToView
+' Run once with Alt+F8, then restart Outlook:
+'   NVS_SetRibbonShortcuts        Alt, X opens your NVS_mail tab, then one key
+'                                 per button (F File to Chain, M Move...)
 '
 ' The settings you can change are just below.
 '==============================================================================
@@ -60,6 +63,21 @@ Private Const NVS_MEETING_SUBJECT_PREFIX As String = ""
 
 ' Schedule Meeting: True = people who were only ever on CC become optional.
 Private Const NVS_CC_AS_OPTIONAL As Boolean = True
+
+' Ribbon shortcuts, set by running NVS_SetRibbonShortcuts once (Alt+F8) and
+' restarting Outlook. Alt, then this key, opens your NVS_mail ribbon tab.
+' Set it to "" and run it again to go back to Outlook's own Y1, Y2...
+Private Const NVS_RIBBON_TAB_KEY As String = "X"
+
+' ...then one of these keys presses a button on that tab (one to three
+' letters or digits each). Buttons not listed here, or whose key is already
+' taken, get a free letter from their name.
+Private Const NVS_RIBBON_KEYS As String = _
+    "NVS_FileToChainFolder=F;NVS_MoveToFolder=M;NVS_UndoMove=U;" & _
+    "NVS_SaveEmailAndAttachments=S;NVS_Search=E;NVS_ScheduleMeetingWithChain=I;" & _
+    "NVS_RenameAttachments=R;NVS_TranscribeCall=T;NVS_SetFolderColor=C;" & _
+    "NVS_ListFolderColors=O;NVS_SaveLocations=L;NVS_RemoveFolderColor=D;" & _
+    "NVS_RecolorSelected=P;NVS_RecolorInbox=B;NVS_ApplyRowColorsToView=W"
 
 '------------------------------------------------------------------------------
 ' Internals
@@ -1179,6 +1197,549 @@ Private Sub SearchNote(ByVal folderID As String)
     If mSearchForm Is Nothing Then Exit Sub
     On Error Resume Next
     mSearchForm.FolderChanged folderID
+End Sub
+
+'==============================================================================
+' Ribbon shortcuts: Alt, X opens the NVS_mail tab, then one key per button
+'==============================================================================
+
+' Gives your NVS_mail ribbon tab the shortcut Alt, X (NVS_RIBBON_TAB_KEY) and
+' each button on it a key of its own (NVS_RIBBON_KEYS), in place of the Y1,
+' Y2... that Outlook makes up. Customize Ribbon has no box for these, so this
+' adds them to the file Outlook keeps your ribbon in. The old file is kept as
+' a .bak, and a copy Outlook can import goes on your Desktop. Restart Outlook
+' afterwards, and run this again whenever you change the tab.
+Public Sub NVS_SetRibbonShortcuts()
+    Dim dirs As Variant, d As Variant, fName As String, files As New Collection, f As Variant
+    Dim summary As String, piece As String, importName As String, imports As String
+    Dim errText As String, problems As String, res As Long, changed As Long, already As Long
+    Dim onOwnTabs As Boolean, removing As Boolean, msg As String
+
+    removing = (Len(NVS_RIBBON_TAB_KEY) = 0)
+    If Not removing And Not RibbonKeyOK(NVS_RIBBON_TAB_KEY) Then
+        MsgBox "NVS_RIBBON_TAB_KEY, at the top of the NVS_mail module, must be one to three " & _
+               "letters or digits.", vbExclamation, NVS_APP
+        Exit Sub
+    End If
+
+    ' Outlook keeps one ribbon file per kind of window: normally in Local
+    ' AppData, or in roaming AppData if your company has set that up.
+    dirs = Array(Environ$("LOCALAPPDATA") & "\Microsoft\Office\", Environ$("APPDATA") & "\Microsoft\Office\")
+    On Error Resume Next
+    For Each d In dirs
+        fName = vbNullString
+        fName = Dir$(d & "olk*.officeUI")
+        Do While Len(fName) > 0
+            If LCase$(Right$(fName, 9)) = ".officeui" Then files.Add d & fName
+            fName = vbNullString
+            fName = Dir$()
+        Loop
+    Next d
+    On Error GoTo 0
+
+    For Each f In files
+        piece = vbNullString
+        importName = vbNullString
+        errText = vbNullString
+        res = RibbonKeysForFile(CStr(f), piece, importName, errText)
+        Select Case res
+            Case 1, 3
+                If res = 1 Then changed = changed + 1 Else already = already + 1
+                summary = summary & piece
+                If Len(importName) > 0 Then imports = imports & vbCrLf & "      " & importName
+            Case 2
+                onOwnTabs = True
+            Case -1
+                problems = problems & vbCrLf & f & ": " & errText
+        End Select
+    Next f
+
+    If changed + already = 0 Then
+        If Len(problems) > 0 Then
+            msg = "The shortcut keys couldn't be set:" & problems
+        ElseIf onOwnTabs Then
+            msg = "Your NVS_mail buttons are on one of Outlook's own tabs (such as Home), and those " & _
+                  "keep Outlook's own keys. Give them a tab of their own: File > Options > Customize " & _
+                  "Ribbon, click New Tab, Rename... it to NVS_mail, move your NVS_mail buttons into it " & _
+                  "and click OK. Then run this again."
+        Else
+            msg = "No NVS_mail tab was found on your ribbon. Make one first: File > Options > " & _
+                  "Customize Ribbon, click New Tab, Rename... it to NVS_mail, add the NVS_ macros " & _
+                  "to it and click OK. Then run this again."
+        End If
+        MsgBox msg, vbExclamation, NVS_APP
+        Exit Sub
+    End If
+
+    If removing Then
+        msg = "Done. Close Outlook completely and start it again, and your NVS_mail tab goes back " & _
+              "to Outlook's own keys (Y1, Y2...)."
+    Else
+        If changed > 0 Then
+            msg = "Done. Close Outlook completely and start it again. Then press Alt, the tab's key, " & _
+                  "then a button's key:"
+        Else
+            msg = "These keys are already in Outlook's ribbon file. If you don't see them, close " & _
+                  "Outlook completely and start it again:"
+        End If
+        msg = msg & vbCrLf & vbCrLf & summary
+        If Len(imports) > 0 Then
+            msg = msg & "Still Y1, Y2... after the restart? Import the copy saved on your Desktop " & _
+                  "instead: File > Options > Customize Ribbon > Import/Export > Import customization " & _
+                  "file, pick it and click Yes." & imports & vbCrLf & vbCrLf
+        End If
+        msg = msg & "Run this again whenever you change the NVS_mail tab."
+    End If
+    If Len(problems) > 0 Then msg = msg & vbCrLf & vbCrLf & "Couldn't change:" & problems
+    MsgBox msg, vbInformation, NVS_APP
+End Sub
+
+' Sets the shortcut keys in one of Outlook's ribbon files. Returns 1 if it
+' changed the file, 3 if the file already had them, 2 if NVS_mail's buttons
+' are only on Outlook's own tabs, 0 if there's no NVS_mail tab, and -1 if it
+' failed (errText says why). summary gets the keys for the message, and
+' importName the copy saved on the Desktop.
+Private Function RibbonKeysForFile(ByVal path As String, ByRef summary As String, _
+                                   ByRef importName As String, ByRef errText As String) As Long
+    Dim s As String, orig As String, wide As Boolean, L As Long, n As Long, i As Long, j As Long
+    Dim tName() As String, tNameEnd() As Long, tEnd() As Long, tParent() As Long
+    Dim score() As Long, newKey() As String, stack() As Long, sp As Long
+    Dim p As Long, q As Long, k As Long, c As String, quote As String, nm As String
+    Dim tabIdx As Long, best As Long, pass As Long, tabLabel As String, btnLabel As String
+    Dim want As String, used As String, lines As String, removing As Boolean, onOwnTabs As Boolean
+    Dim attrStart As Long, valStart As Long, valLen As Long, bak As String
+
+    On Error GoTo Failed
+    removing = (Len(NVS_RIBBON_TAB_KEY) = 0)
+    s = RibbonReadFile(path, wide)
+    orig = s
+    L = Len(s)
+    If L = 0 Then Exit Function
+
+    ' Every start tag: its name without the "mso:", where its name ends and
+    ' where the tag ends, and the tag it sits in.
+    ReDim tName(1 To 64)
+    ReDim tNameEnd(1 To 64)
+    ReDim tEnd(1 To 64)
+    ReDim tParent(1 To 64)
+    ReDim stack(0 To 64)
+    p = InStr(1, s, "<")
+    Do While p > 0
+        c = Mid$(s, p + 1, 1)
+        If Mid$(s, p, 4) = "<!--" Then
+            q = InStr(p + 4, s, "-->")
+            If q > 0 Then q = q + 2
+        ElseIf c = "?" Or c = "!" Then
+            q = InStr(p + 1, s, ">")
+        ElseIf c = "/" Then
+            q = InStr(p + 1, s, ">")
+            If sp > 0 Then sp = sp - 1
+        Else
+            k = p + 1
+            Do While k <= L
+                c = Mid$(s, k, 1)
+                If c = " " Or c = "/" Or c = ">" Or c = vbTab Or c = vbCr Or c = vbLf Then Exit Do
+                k = k + 1
+            Loop
+            nm = LCase$(Mid$(s, p + 1, k - p - 1))
+            nm = Mid$(nm, InStr(nm, ":") + 1)
+            quote = vbNullString
+            q = k
+            Do While q <= L
+                c = Mid$(s, q, 1)
+                If Len(quote) > 0 Then
+                    If c = quote Then quote = vbNullString
+                ElseIf c = """" Or c = "'" Then
+                    quote = c
+                ElseIf c = ">" Then
+                    Exit Do
+                End If
+                q = q + 1
+            Loop
+            If q > L Then
+                q = 0
+            Else
+                n = n + 1
+                If n > UBound(tName) Then
+                    ReDim Preserve tName(1 To 2 * n)
+                    ReDim Preserve tNameEnd(1 To 2 * n)
+                    ReDim Preserve tEnd(1 To 2 * n)
+                    ReDim Preserve tParent(1 To 2 * n)
+                End If
+                tName(n) = nm
+                tNameEnd(n) = k
+                tEnd(n) = q
+                tParent(n) = stack(sp)
+                If Mid$(s, q - 1, 1) <> "/" Then
+                    sp = sp + 1
+                    If sp > UBound(stack) Then ReDim Preserve stack(0 To 2 * sp)
+                    stack(sp) = n
+                End If
+            End If
+        End If
+        If q = 0 Then Exit Do
+        p = InStr(q + 1, s, "<")
+    Loop
+    If n = 0 Then Exit Function
+
+    ' Which tab is NVS_mail's: one of your own tabs (Outlook's own have no
+    ' plain id), best of all one named NVS_mail, or else one holding
+    ' NVS_mail's buttons.
+    ReDim score(1 To n)
+    For i = 1 To n
+        If tName(i) = "tab" Then
+            If Len(XmlAttr(s, tNameEnd(i), tEnd(i), "id")) = 0 Then
+                score(i) = -1
+            Else
+                tabLabel = RibbonPlain(XmlText(XmlAttr(s, tNameEnd(i), tEnd(i), "label")))
+                If tabLabel = "nvsmail" Then
+                    score(i) = 3
+                ElseIf Left$(tabLabel, 3) = "nvs" Then
+                    score(i) = 1
+                End If
+            End If
+        ElseIf tName(i) = "button" Then
+            If UCase$(Left$(RibbonMacro(XmlAttr(s, tNameEnd(i), tEnd(i), "onAction")), 4)) = "NVS_" Then
+                j = tParent(i)
+                Do While j > 0
+                    If tName(j) = "tab" Then Exit Do
+                    j = tParent(j)
+                Loop
+                If j > 0 Then
+                    If score(j) = -1 Then
+                        onOwnTabs = True
+                    ElseIf score(j) < 2 Then
+                        score(j) = 2
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    For i = 1 To n
+        If score(i) > best Then
+            best = score(i)
+            tabIdx = i
+        End If
+    Next i
+    If tabIdx = 0 Then
+        If onOwnTabs Then RibbonKeysForFile = 2
+        Exit Function
+    End If
+
+    ' The keys: the tab's own, then NVS_mail's buttons from NVS_RIBBON_KEYS,
+    ' then a free letter for every other button on the tab. Outlook's own
+    ' commands added to the tab (no macro) keep their keys.
+    ReDim newKey(1 To n)
+    If removing Then newKey(tabIdx) = "-" Else newKey(tabIdx) = UCase$(NVS_RIBBON_TAB_KEY)
+    used = ";"
+    For pass = 1 To 2
+        For i = tabIdx + 1 To n
+            j = tParent(i)
+            If tName(i) = "button" And j > 0 Then
+                If tName(j) = "group" And tParent(j) = tabIdx And Len(newKey(i)) = 0 Then
+                    If removing Then
+                        newKey(i) = "-"
+                    Else
+                        If pass = 1 Then
+                            want = RibbonKeyWanted(RibbonMacro(XmlAttr(s, tNameEnd(i), tEnd(i), "onAction")))
+                        Else
+                            want = RibbonKeyFromLabel(XmlText(XmlAttr(s, tNameEnd(i), tEnd(i), "label")), used)
+                        End If
+                        If RibbonKeyOK(want) Then
+                            If Not RibbonKeyClash(used, want) Then
+                                newKey(i) = want
+                                used = used & want & ";"
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        Next i
+    Next pass
+
+    ' The list for the message, in the order the buttons are on the tab.
+    For i = tabIdx + 1 To n
+        If Len(newKey(i)) > 0 And newKey(i) <> "-" Then
+            btnLabel = XmlText(XmlAttr(s, tNameEnd(i), tEnd(i), "label"))
+            If Len(btnLabel) = 0 Then btnLabel = RibbonMacro(XmlAttr(s, tNameEnd(i), tEnd(i), "onAction"))
+            lines = lines & "      " & newKey(i) & "     " & btnLabel & vbCrLf
+        End If
+    Next i
+    If removing Then
+        summary = RibbonWindowName(path) & vbCrLf
+    Else
+        summary = RibbonWindowName(path) & ":  Alt, " & newKey(tabIdx) & ", then" & vbCrLf & lines & vbCrLf
+    End If
+
+    ' Put the keys in, working from the end of the file back so the places
+    ' found above stay right: replace a keytip that's there, add one that
+    ' isn't, or take it out when going back to Outlook's own keys.
+    For i = n To 1 Step -1
+        If Len(newKey(i)) > 0 Then
+            attrStart = 0
+            valStart = 0
+            valLen = 0
+            XmlAttr s, tNameEnd(i), tEnd(i), "keytip", attrStart, valStart, valLen
+            If newKey(i) = "-" Then
+                If attrStart > 1 Then s = Left$(s, attrStart - 2) & Mid$(s, valStart + valLen + 1)
+            ElseIf valStart > 0 Then
+                s = Left$(s, valStart - 1) & newKey(i) & Mid$(s, valStart + valLen)
+            Else
+                s = Left$(s, tNameEnd(i) - 1) & " keytip=""" & newKey(i) & """" & Mid$(s, tNameEnd(i))
+            End If
+        End If
+    Next i
+
+    If s = orig Then
+        RibbonKeysForFile = 3
+    Else
+        bak = path & ".bak"
+        FileCopy path, bak
+        RibbonWriteFile path, s, wide
+        RibbonKeysForFile = 1
+    End If
+    If Not removing Then importName = RibbonSaveImportCopy(path, s, wide)
+    Exit Function
+
+Failed:
+    errText = Err.Description
+    Resume GiveUp
+GiveUp:
+    ' If the file went missing while being replaced, put the old one back.
+    On Error Resume Next
+    If Len(bak) > 0 Then
+        If Len(Dir$(path)) = 0 Then FileCopy bak, path
+    End If
+    RibbonKeysForFile = -1
+End Function
+
+' The value of one attribute (such as "label") of the start tag whose
+' attributes run from fromPos to toPos, plus where the attribute and its
+' value start and how long the value is, for editing it.
+Private Function XmlAttr(ByRef s As String, ByVal fromPos As Long, ByVal toPos As Long, _
+                         ByVal attrName As String, Optional ByRef attrStart As Long, _
+                         Optional ByRef valStart As Long, Optional ByRef valLen As Long) As String
+    Dim p As Long, a As Long, e As Long, q As Long, c As String
+    attrStart = 0
+    valStart = 0
+    valLen = 0
+    p = fromPos
+    Do While p < toPos
+        c = Mid$(s, p, 1)
+        If c = " " Or c = "/" Or c = vbTab Or c = vbCr Or c = vbLf Then
+            p = p + 1
+        Else
+            ' the attribute's name, then past "=" to the opening quote
+            a = p
+            Do While p < toPos
+                c = Mid$(s, p, 1)
+                If c = "=" Or c = " " Or c = vbTab Or c = vbCr Or c = vbLf Then Exit Do
+                p = p + 1
+            Loop
+            e = p
+            Do While p < toPos
+                c = Mid$(s, p, 1)
+                If c = """" Or c = "'" Then Exit Do
+                p = p + 1
+            Loop
+            If p >= toPos Then Exit Function
+            q = InStr(p + 1, s, c)
+            If q = 0 Or q >= toPos Then Exit Function
+            If StrComp(Mid$(s, a, e - a), attrName, vbTextCompare) = 0 Then
+                attrStart = a
+                valStart = p + 1
+                valLen = q - p - 1
+                XmlAttr = Mid$(s, valStart, valLen)
+                Exit Function
+            End If
+            p = q + 1
+        End If
+    Loop
+End Function
+
+' An attribute value as plain text ("Save &amp; File" gives "Save & File").
+Private Function XmlText(ByVal v As String) As String
+    v = Replace(v, "&quot;", """")
+    v = Replace(v, "&apos;", "'")
+    v = Replace(v, "&lt;", "<")
+    v = Replace(v, "&gt;", ">")
+    XmlText = Replace(v, "&amp;", "&")
+End Function
+
+' The macro a ribbon button runs, from its onAction:
+' "Project1.NVS_mail.NVS_Search" gives "NVS_Search".
+Private Function RibbonMacro(ByVal onAction As String) As String
+    Dim i As Long
+    i = Len(onAction)
+    Do While i > 0
+        If Not Mid$(onAction, i, 1) Like "[A-Za-z0-9_]" Then Exit Do
+        i = i - 1
+    Loop
+    RibbonMacro = Mid$(onAction, i + 1)
+End Function
+
+' The key NVS_RIBBON_KEYS gives a macro ("" if it isn't listed).
+Private Function RibbonKeyWanted(ByVal macroName As String) As String
+    Dim pair As Variant, eq As Long
+    If Len(macroName) = 0 Then Exit Function
+    For Each pair In Split(NVS_RIBBON_KEYS, ";")
+        eq = InStr(pair, "=")
+        If eq > 0 Then
+            If StrComp(Trim$(Left$(pair, eq - 1)), macroName, vbTextCompare) = 0 Then
+                RibbonKeyWanted = UCase$(Trim$(Mid$(pair, eq + 1)))
+                Exit Function
+            End If
+        End If
+    Next pair
+End Function
+
+' True for a key Outlook accepts: one to three letters or digits.
+Private Function RibbonKeyOK(ByVal k As String) As Boolean
+    Dim i As Long
+    If Len(k) < 1 Or Len(k) > 3 Then Exit Function
+    For i = 1 To Len(k)
+        If Not UCase$(Mid$(k, i, 1)) Like "[A-Z0-9]" Then Exit Function
+    Next i
+    RibbonKeyOK = True
+End Function
+
+' True if key k can't go beside the keys in used (";F;M;"): it's the same as
+' one of them, or one starts with the other (S and SA would be ambiguous).
+Private Function RibbonKeyClash(ByVal used As String, ByVal k As String) As Boolean
+    Dim u As Variant
+    For Each u In Split(used, ";")
+        If Len(u) > 0 Then
+            If Left$(u, Len(k)) = k Or Left$(k, Len(u)) = u Then
+                RibbonKeyClash = True
+                Exit Function
+            End If
+        End If
+    Next u
+End Function
+
+' A free key for a button that has none set: the first letter of a word in
+' its name, then any other letter in its name, then any letter, then a digit.
+' Y and Z are left out, since Outlook uses them for keys it makes up.
+Private Function RibbonKeyFromLabel(ByVal btnLabel As String, ByVal used As String) As String
+    Dim cand As String, prev As String, c As String, i As Long
+    btnLabel = UCase$(btnLabel)
+    prev = " "
+    For i = 1 To Len(btnLabel)
+        c = Mid$(btnLabel, i, 1)
+        If c Like "[A-X]" And Not prev Like "[A-Z0-9]" Then cand = cand & c
+        prev = c
+    Next i
+    For i = 1 To Len(btnLabel)
+        c = Mid$(btnLabel, i, 1)
+        If c Like "[A-X]" Then cand = cand & c
+    Next i
+    cand = cand & "ABCDEFGHIJKLMNOPQRSTUVWX123456789"
+    For i = 1 To Len(cand)
+        c = Mid$(cand, i, 1)
+        If Not RibbonKeyClash(used, c) Then
+            RibbonKeyFromLabel = c
+            Exit Function
+        End If
+    Next i
+End Function
+
+' Lower-case letters and digits only ("NVS_Mail" gives "nvsmail").
+Private Function RibbonPlain(ByVal v As String) As String
+    Dim i As Long, c As String
+    v = LCase$(v)
+    For i = 1 To Len(v)
+        c = Mid$(v, i, 1)
+        If c Like "[a-z0-9]" Then RibbonPlain = RibbonPlain & c
+    Next i
+End Function
+
+' Which Outlook window a ribbon file is for.
+Private Function RibbonWindowName(ByVal path As String) As String
+    Dim base As String
+    base = LCase$(Mid$(path, InStrRev(path, "\") + 1))
+    base = Left$(base, InStr(base & ".", ".") - 1)
+    Select Case base
+        Case "olkexplorer": RibbonWindowName = "Main window"
+        Case "olkmailitem": RibbonWindowName = "Email you're writing"
+        Case "olkmailread": RibbonWindowName = "Email you've opened"
+        Case Else: RibbonWindowName = base
+    End Select
+End Function
+
+' Saves a copy of a ribbon file on the Desktop that Outlook can import (File >
+' Options > Customize Ribbon > Import/Export), in case Outlook doesn't pick
+' the keys up from its own file. Returns the copy's name, or "" if it failed.
+Private Function RibbonSaveImportCopy(ByVal path As String, ByVal s As String, ByVal wide As Boolean) As String
+    Dim base As String, fileName As String, p As Long
+    On Error GoTo Done
+    base = Mid$(path, InStrRev(path, "\") + 1)
+    base = Left$(base, InStr(base & ".", ".") - 1)
+    ' An import file says which window it's for; Outlook's own file doesn't.
+    If InStr(1, s, "<mso:cmd", vbTextCompare) = 0 Then
+        p = InStr(1, s, "<mso:customUI", vbTextCompare)
+        If p = 0 Then Exit Function
+        s = Left$(s, p - 1) & "<mso:cmd app=""" & base & """ dt=""1"" />" & vbCrLf & Mid$(s, p)
+    End If
+    fileName = "NVS_mail ribbon (" & LCase$(RibbonWindowName(path)) & ").exportedUI"
+    RibbonWriteFile DesktopFolder() & "\" & fileName, s, wide
+    RibbonSaveImportCopy = fileName
+Done:
+End Function
+
+Private Function DesktopFolder() As String
+    Dim p As String
+    On Error Resume Next
+    p = CreateObject("WScript.Shell").SpecialFolders("Desktop")
+    On Error GoTo 0
+    If p = "" Then p = Environ$("USERPROFILE") & "\Desktop"
+    DesktopFolder = p
+End Function
+
+' Reads a file as text, one character per byte, so UTF-8 comes back exactly
+' as it was when written out again (only plain ASCII is ever added). A file
+' that starts with a UTF-16 mark is read as UTF-16 instead (wide = True).
+Private Function RibbonReadFile(ByVal path As String, ByRef wide As Boolean) As String
+    Dim fn As Integer, b() As Byte, n As Long, i As Long, s As String
+    fn = FreeFile
+    Open path For Binary Access Read As #fn
+    n = LOF(fn)
+    If n > 0 Then
+        ReDim b(0 To n - 1)
+        Get #fn, , b
+    End If
+    Close #fn
+    If n < 2 Then Exit Function
+    If b(0) = &HFF And b(1) = &HFE Then
+        wide = True
+        s = b
+        RibbonReadFile = Mid$(s, 2)
+    Else
+        s = Space$(n)
+        For i = 0 To n - 1
+            Mid$(s, i + 1, 1) = ChrW$(b(i))
+        Next i
+        RibbonReadFile = s
+    End If
+End Function
+
+' Writes text read by RibbonReadFile to a file, replacing what's there.
+Private Sub RibbonWriteFile(ByVal path As String, ByVal s As String, ByVal wide As Boolean)
+    Dim fn As Integer, b() As Byte, n As Long, i As Long
+    If wide Then
+        b = ChrW$(&HFEFF) & s
+    Else
+        n = Len(s)
+        If n = 0 Then Exit Sub
+        ReDim b(0 To n - 1)
+        For i = 1 To n
+            b(i - 1) = AscW(Mid$(s, i, 1)) And &HFF
+        Next i
+    End If
+    If Len(Dir$(path)) > 0 Then Kill path
+    fn = FreeFile
+    Open path For Binary Access Write As #fn
+    Put #fn, , b
+    Close #fn
 End Sub
 
 '==============================================================================

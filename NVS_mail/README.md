@@ -15,6 +15,7 @@
 | **Meeting with Chain** (`NVS_ScheduleMeetingWithChain`) | Opens a **new** meeting invite with everyone on the chain. It isn't "Reply with Meeting", so the invite doesn't land in the chain. |
 | **Transcribe Call** (`NVS_TranscribeCall`) | Transcribes a Zoom call (or anything playing on your PC) into an Outlook email, using Windows 11's Live Captions. Optional, in file 4. |
 | **Search** (`NVS_Search`) | Finds emails in every folder as you type, newest first, without relying on Windows' search index. Optional, in file 5. |
+| **Ribbon shortcuts** (`NVS_SetRibbonShortcuts`) | Run once: **Alt, X** opens your NVS_mail tab, and one more key presses a button (F File to Chain, M Move, U Undo, S Save, E Search...) instead of Outlook's Y1, Y2... |
 
 Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `NVS_ApplyRowColorsToView` (see [Colors](#3-color-coding)).
 
@@ -82,7 +83,7 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 
 ### 6. Add the NVS_mail buttons to the ribbon
 
-**Main window:** **File > Options > Customize Ribbon**. On the right, select the **Home (Mail)** tab and click **New Group**, then **Rename...** it to `NVS_mail`. On the left, set *Choose commands from* to **Macros** and add:
+**Main window:** **File > Options > Customize Ribbon**. On the right, select the **Home (Mail)** tab and click **New Tab**. **Rename...** the new tab to `NVS_mail`, and its *New Group* to something like `Mail`. A tab of its own is what gives the buttons the Alt, X shortcuts below. On the left, set *Choose commands from* to **Macros** and add:
 
 | Macro (listed as `Project1.NVS_...`) | Suggested button name |
 |---|---|
@@ -98,11 +99,34 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 | `NVS_TranscribeCall` | Transcribe Call (only if you added file 4) |
 | `NVS_Search` | Search (needs file 5) |
 
-Only NVS_mail's button macros appear in that list (14, or 15 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
+Only NVS_mail's own macros appear in that list (15, or 16 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go on the tab too, or you can run them from **Alt+F8**. `NVS_SetRibbonShortcuts` doesn't need a button, since you run it once (below).
 
-**Email window** (for Rename Attachments, and Save/Meeting on an open email): open any email or a new message, right-click its ribbon, choose **Customize the Ribbon**, and add the same macros to a new `NVS_mail` group on the **Message** tab.
+**Email window** (for Rename Attachments, and Save/Meeting on an open email): open any email or a new message, right-click its ribbon, choose **Customize the Ribbon**, and add the same macros to a new `NVS_mail` group on the **Message** tab. To get the Alt, X keys there too, use a new tab instead of a group, the same way as in the main window.
 
-**Keyboard shortcuts:** macros you add to the **Quick Access Toolbar** get shortcuts. The first button is Alt+1, the second Alt+2, and so on. Put **File to Chain** first and **Undo Move** second, and Alt+1 files an email while Alt+2 takes it back.
+**Shortcut keys (Alt, X):** Outlook names the keys on a tab you make yourself Y1, Y2 and so on, and Customize Ribbon has no way to change them. NVS_mail can:
+
+1. Press **Alt+F8**, pick `NVS_SetRibbonShortcuts` and click **Run**. It lists the keys it set.
+2. Close Outlook completely and start it again.
+
+Then **Alt, X** opens the NVS_mail tab, and one more key presses a button. For example, Alt, X, F files the selected email, and Alt, X, U puts it back.
+
+| Key | Button | | Key | Button |
+|---|---|---|---|---|
+| **F** | File to Chain | | **C** | Set Folder Color |
+| **M** | Move (chain) | | **O** | Folder Colors |
+| **U** | Undo Move | | **L** | Save Locations |
+| **S** | Save Email + Attachments | | **D** | Remove Folder Color |
+| **E** | Search (as in Ctrl+E, Outlook's own search key) | | **P** | Recolor Selected |
+| **I** | Meeting with Chain (I for invite) | | **B** | Recolor Inbox |
+| **R** | Rename Attachments | | **W** | Row colors (`NVS_ApplyRowColorsToView`) |
+| **T** | Transcribe Call | | | |
+
+* Any other macro on the tab, such as one of your own, gets a free letter from its name. Outlook's own commands that you add to the tab keep the keys Outlook gives them.
+* To use different keys, change `NVS_RIBBON_TAB_KEY` and `NVS_RIBBON_KEYS` at the top of file 1, then run it again.
+* Run it again whenever you change the tab in Customize Ribbon.
+* Outlook has no setting for these keys, so `NVS_SetRibbonShortcuts` writes them into the file Outlook keeps your ribbon in, `%LOCALAPPDATA%\Microsoft\Office\olkexplorer.officeUI`. It keeps the old file next to it as `olkexplorer.officeUI.bak`. It also saves a copy on your Desktop that you can import if the keys don't show up (see [Troubleshooting](#troubleshooting)).
+
+**Quick Access Toolbar:** macros you add there get even shorter shortcuts. The first button is Alt+1, the second Alt+2, and so on. Put **File to Chain** first and **Undo Move** second, and Alt+1 files an email while Alt+2 takes it back.
 
 ### 7. Try it
 
@@ -115,7 +139,9 @@ Only NVS_mail's button macros appear in that list (14, or 15 with file 4). All t
 
 Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**, and paste the new file. For the form, right-click it and choose View Code first. Then **Debug > Compile**, sign again, save, and restart Outlook. Your folder colors and save locations are kept, since they're stored in the registry rather than in the code.
 
-**Coming from the version with the `NVS_mail_Dialog` form:** replace files 1 and 2, plus file 4 if you use it. Add file 5 if you want the Search window. ThisOutlookSession (file 3) hasn't changed.
+**Coming from the version with the Search window:** replace file 1 only. Then, for the Alt, X keys, run `NVS_SetRibbonShortcuts` (see [step 6](#6-add-the-nvs_mail-buttons-to-the-ribbon)).
+
+**Coming from the version with the `NVS_mail_Dialog` form, but no Search window:** replace files 1 and 2, plus file 4 if you use it. Add file 5 if you want the Search window. ThisOutlookSession (file 3) hasn't changed.
 
 **Coming from the version with the `NVS_mail_FolderPicker` form:**
 
@@ -344,6 +370,8 @@ These are at the top of the **NVS_mail** module (file 1). Change the value, then
 | `NVS_SUBFOLDER_PER_EMAIL` | `True` | When saving several emails at once, give each one its own subfolder. |
 | `NVS_MEETING_SUBJECT_PREFIX` | `""` | Text added before the meeting subject. |
 | `NVS_CC_AS_OPTIONAL` | `True` | People only on CC become optional attendees. |
+| `NVS_RIBBON_TAB_KEY` | `"X"` | The key after Alt that opens your NVS_mail tab. Run `NVS_SetRibbonShortcuts` again after changing it. `""` gives the tab Outlook's own keys back. |
+| `NVS_RIBBON_KEYS` | `"NVS_FileToChainFolder=F;..."` | The key for each button on that tab, one to three letters or digits each. Run `NVS_SetRibbonShortcuts` again after changing it. |
 
 The Search window's settings are in its own section, [Search](#7-search-optional).
 
@@ -356,6 +384,10 @@ Folder colors, save locations, recent searches and the last folder you moved mai
 * **"User-defined type not defined" when compiling:** the form isn't named exactly `NVS_mail_Dialog`. It's probably still `UserForm1` or `NVS_mail_FolderPicker`, or the name has a typo.
 * **Red line, or "Duplicate Option statement", "Invalid outside procedure" or "Only comments may appear after End Sub" right after pasting:** there's an extra `Option Explicit` (keep only the first one), a file was pasted twice, or a file went in the wrong place. File 1 goes in a Module, file 2 in the UserForm's code window, and file 3 in ThisOutlookSession. If ThisOutlookSession has your own code too, see step 4.
 * **Buttons do nothing after restarting Outlook:** macros are disabled. See steps 1 and 5.
+* **"An error occurred while attempting to verify the VBA project's signature" when Outlook starts:** the code changed after it was signed, which usually happens after pasting in an update. In the VBA editor choose **Debug > Compile**, then **Tools > Digital Signature > Remove**, then **Choose...** and pick your certificate. Click **Save**, close Outlook completely and start it again. If it keeps happening, make a new certificate with **Digital Certificate for VBA Projects** and sign with that one.
+* **The NVS_mail tab still shows Y1, Y2... after running `NVS_SetRibbonShortcuts`:** close Outlook completely (check Task Manager) and start it again. If the keys still aren't there, import the copy it saved on your Desktop: **File > Options > Customize Ribbon > Import/Export > Import customization file**, pick `NVS_mail ribbon (main window).exportedUI` and click **Yes**. The copy holds all your current ribbon and Quick Access Toolbar changes, plus the keys.
+* **Only the tab shows a Y-number, and its buttons have their letters:** something else already uses X, often an Add-ins tab. Set `NVS_RIBBON_TAB_KEY` to another letter, such as `"N"`, and run `NVS_SetRibbonShortcuts` again.
+* **Your ribbon changes disappeared after running `NVS_SetRibbonShortcuts`:** close Outlook and open `%LOCALAPPDATA%\Microsoft\Office` in File Explorer. Delete `olkexplorer.officeUI`, rename `olkexplorer.officeUI.bak` to `olkexplorer.officeUI`, and start Outlook again.
 * **New mail isn't colored:** the code in ThisOutlookSession (step 4) starts when Outlook starts, so restart Outlook after installing. Also check that the chain is actually filed in a colored folder, using Folder Colors.
 * **"isn't filed anywhere yet" for a chain you did file:** filing works within one mailbox. Mail in a different mailbox, PST file or online archive isn't part of the same Outlook conversation. Also check the folder isn't in `NVS_EXCLUDED_FOLDER_NAMES`.
 * **Unrelated emails share a color:** Outlook sometimes puts emails with the same subject into one conversation, which is common with automated emails. NVS_mail goes by Outlook's conversation, so they count as one chain.
