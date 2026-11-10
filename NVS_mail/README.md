@@ -14,6 +14,7 @@
 | **Rename Attachments** (`NVS_RenameAttachments`) | One window listing every attachment on the email you're writing. Rename any of them, and the extensions are kept. |
 | **Meeting with Chain** (`NVS_ScheduleMeetingWithChain`) | Opens a **new** meeting invite with everyone on the chain. It isn't "Reply with Meeting", so the invite doesn't land in the chain. |
 | **Transcribe Call** (`NVS_TranscribeCall`) | Transcribes a Zoom call (or anything playing on your PC) into an Outlook email, using Windows 11's Live Captions. Optional, in file 4. |
+| **Search** (`NVS_Search`) | Finds emails in every folder as you type, newest first, without relying on Windows' search index. Optional, in file 5. |
 
 Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `NVS_ApplyRowColorsToView` (see [Colors](#3-color-coding)).
 
@@ -21,7 +22,7 @@ Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `
 
 ## Setup (about 10 minutes, once)
 
-You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the 3 text files in this folder, plus optional file 4 if you want to transcribe calls. Each file has a "HOW TO ADD" note at the top.
+You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the 3 text files in this folder. Two more are optional: file 4 to transcribe calls and file 5 for the Search window. Each file has a "HOW TO ADD" note at the top.
 
 | File | Where it goes in the VBA editor | Name (F4 > (Name)) |
 |---|---|---|
@@ -29,8 +30,9 @@ You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the
 | `2_NVS_mail_Dialog.txt` | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_Dialog` (must match exactly) |
 | `3_ThisOutlookSession.txt` | Microsoft Outlook Objects > **ThisOutlookSession** (already there) | - |
 | `4_NVS_mail_Transcribe.txt` *(optional)* | **Tools > References** > tick **UIAutomationClient**, then Insert > **Module** | `NVS_mail_Transcribe` |
+| `5_NVS_mail_Search.txt` *(optional)* | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_Search` (must match exactly) |
 
-Three is the minimum. Outlook keeps code, forms and its own events in three separate places, and each needs its own paste. File 4 is an optional extra; see [Transcribe a call](#6-transcribe-a-call-optional).
+Three is the minimum. Outlook keeps code, forms and its own events in three separate places, and each needs its own paste. Files 4 and 5 are optional extras; see [Transcribe a call](#6-transcribe-a-call-optional) and [Search](#7-search-optional).
 
 **Already set up an earlier version?** See [Updating](#updating-to-a-new-version) instead.
 
@@ -94,8 +96,9 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 | `NVS_SaveLocations` | Save Locations |
 | `NVS_RenameAttachments` | Rename Attachments (works while replying in the reading pane) |
 | `NVS_TranscribeCall` | Transcribe Call (only if you added file 4) |
+| `NVS_Search` | Search (needs file 5) |
 
-Only NVS_mail's button macros appear in that list (13, or 14 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
+Only NVS_mail's button macros appear in that list (14, or 15 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go in the group too, or you can run them from **Alt+F8**.
 
 **Email window** (for Rename Attachments, and Save/Meeting on an open email): open any email or a new message, right-click its ribbon, choose **Customize the Ribbon**, and add the same macros to a new `NVS_mail` group on the **Message** tab.
 
@@ -112,7 +115,7 @@ Only NVS_mail's button macros appear in that list (13, or 14 with file 4). All t
 
 Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**, and paste the new file. For the form, right-click it and choose View Code first. Then **Debug > Compile**, sign again, save, and restart Outlook. Your folder colors and save locations are kept, since they're stored in the registry rather than in the code.
 
-**Coming from the version with the `NVS_mail_Dialog` form:** replace files 1 and 2, plus file 4 if you use it. ThisOutlookSession (file 3) hasn't changed.
+**Coming from the version with the `NVS_mail_Dialog` form:** replace files 1 and 2, plus file 4 if you use it. Add file 5 if you want the Search window. ThisOutlookSession (file 3) hasn't changed.
 
 **Coming from the version with the `NVS_mail_FolderPicker` form:**
 
@@ -253,6 +256,77 @@ Outlook's own Dictate only listens to your microphone, so it can't hear the othe
 
 Only transcribe a call when everyone on it is fine with that. Many places require everyone's consent, and your firm may have its own rules about recording calls.
 
+### 7. Search (optional)
+
+**Search** (`NVS_Search`, file 5) is a search window built to fix the usual complaints about Outlook's own search.
+
+| Outlook's search | NVS_mail's Search |
+|---|---|
+| Relies on Windows' search index, which is often incomplete, so emails go missing | Reads every email's subject, people, date and folder straight from your mail folders, so nothing on your PC is left out |
+| Shows 250 results unless you change a setting | No cap. Lists the newest 500, and **Show more** lists the rest |
+| Only matches the start of a word: `1234` won't find `PO1234` | Matches anywhere in a word |
+| Often searches just the current folder | Every folder, unless you choose one in **Folder** |
+| "Top results" can bury recent mail | Always newest first |
+| Deleted and junk mail mixed in | Left out unless you tick the box |
+| Doesn't show where a result is filed | A Folder column, and **Go to folder** |
+| You type, press Enter and wait | Results appear as you type |
+
+**One-time setup**
+
+1. In the VBA editor, choose **Insert > UserForm**. Press **F4** and change **(Name)** to `NVS_mail_Search`.
+2. Right-click the form, choose **View Code**, delete anything there, and paste in `5_NVS_mail_Search.txt`. Leave the form blank.
+3. Choose **Debug > Compile**, then save.
+4. Add `NVS_Search` to your ribbon group. On the Quick Access Toolbar it also gets an Alt+number shortcut.
+
+**Using it**
+
+* Click **Search**. The first time in each Outlook session it reads your mail, which takes a few seconds for a typical mailbox. Progress shows at the bottom left, and you can start typing straight away.
+* Before you type anything, it lists your most recent mail from every folder.
+* **Type words.** An email matches when every word appears somewhere in its subject, the sender's name or email address, or the names on its To and Cc lines. The order doesn't matter, and a word can match in the middle of a longer one.
+  * `acme budget` finds emails with both words.
+  * `"site visit"` finds that exact phrase.
+  * `-draft` leaves out emails with that word.
+  * A company name also finds everyone who wrote from an address at that company.
+* **Narrow it down** with the boxes underneath:
+  * **From** and **To** take part of a name. To also covers Cc.
+  * **When** has ready-made periods, plus custom dates.
+  * **Folder** lets you pick a folder or type part of a folder's name. Subfolders are included.
+  * **Has attachments** counts real attachments only, not pictures in a signature.
+  * **One per chain** lists just the newest email of each chain, with the number of emails in it.
+* **The preview** under the list shows the selected email's text, starting at the first place your words appear.
+* **Whole chain** lists every email in the selected email's chain, wherever each one is filed. **Back** returns to your search.
+* **Search text** (Alt+T) also looks inside the emails' text and adds what it finds to the list. If nothing matched by subject or people, pressing Enter does this for you.
+* **In Outlook** runs the same search with Outlook's own search across all folders. Use it for mail that isn't on your PC and for words inside attachments.
+
+| Key | What it does |
+|---|---|
+| **Up / Down**, **Page Up / Down** | Move through the results, even while typing |
+| **Enter** | Open the selected email |
+| **Ctrl+Enter** | Show it in its folder in Outlook |
+| **Esc** | Close the window. Your search is still there next time |
+| **F5** | Read all your mail again |
+
+**Staying up to date:** the window re-reads only folders whose mail has changed. That covers new mail, mail you send, and mail you move or delete. It checks each time you open it and when you type. **F5** reads everything again from scratch.
+
+**Limits**
+
+* **Only mail that's on your PC.** Outlook keeps a set period of mail offline. To check it, go to **File > Account Settings > Account Settings**, double-click your account, and look at **Download email for the past**. Older mail lives only on the server, so use **In Outlook** for it, or move that slider to **All**.
+* **Message text goes through Windows' index.** The text inside emails isn't in the window's own list, so **Search text** uses the same index Outlook does. It matches the start of words, and it can miss emails if that index is incomplete. Searching by subject and people doesn't have that problem.
+* **Memory.** The list is kept in memory while Outlook is open, roughly 60 to 70 MB for every 100,000 emails. It's rebuilt each time Outlook starts.
+* **Shared mailboxes.** One is included when you open Search while looking at one of its folders. Search text covers your own mailbox only.
+* **The mouse wheel** doesn't scroll lists in Outlook's VBA windows. Use the scroll bar or the arrow and Page keys.
+* **Sender addresses.** If reading them turns out to be slow on your PC, the window leaves them out and says so in its status line. Names still match.
+
+The Search window has its own settings at the top of file 5:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SEARCH_SHOW_ROWS` | `500` | Results listed at first. **Show more** lists four times as many. |
+| `SEARCH_MONTHS_BACK` | `0` | `0` reads all the mail on your PC. `24` reads only the last two years, which opens faster and uses less memory. |
+| `SEARCH_SENDER_ADDRESS` | `True` | Also match the sender's email address. |
+| `SEARCH_MAX_EMAILS` | `400000` | Stop reading beyond this many emails. |
+| `TEXT_MAX_RESULTS` | `3000` | Most message-text matches taken for one search. |
+
 ---
 
 ## Settings
@@ -271,7 +345,9 @@ These are at the top of the **NVS_mail** module (file 1). Change the value, then
 | `NVS_MEETING_SUBJECT_PREFIX` | `""` | Text added before the meeting subject. |
 | `NVS_CC_AS_OPTIONAL` | `True` | People only on CC become optional attendees. |
 
-Folder colors, save locations and the last folder you moved mail to are stored in the registry under `HKEY_CURRENT_USER\Software\VB and VBA Program Settings\NVS_mail`.
+The Search window's settings are in its own section, [Search](#7-search-optional).
+
+Folder colors, save locations, recent searches and the last folder you moved mail to are stored in the registry under `HKEY_CURRENT_USER\Software\VB and VBA Program Settings\NVS_mail`.
 
 ---
 
@@ -286,6 +362,9 @@ Folder colors, save locations and the last folder you moved mail to are stored i
 * **NVS_mail's windows look the wrong size, or blurry, on one of your screens:** this happens when two screens use different scaling. In Outlook, go to **File > Options > General**, set **When using multiple displays** to **Optimize for compatibility**, and restart Outlook. You can also resize the Move Items window by dragging its edge, and it keeps the size you choose.
 * **The Save As window doesn't appear:** NVS_mail falls back to Windows' simpler folder browser. Pick the folder there and click OK.
 
+* **Search says it "isn't set up yet":** add file 5. The form must be named exactly `NVS_mail_Search`.
+* **Search takes a long time to read your mail the first time:** set `SEARCH_MONTHS_BACK` at the top of file 5 to `24` (or fewer) so it reads only recent mail, or set `SEARCH_SENDER_ADDRESS` to `False`.
+* **Search shows an email in the wrong folder, or says it has moved:** press **F5** in the Search window to read your mail again.
 * **Transcribe Call says Live Captions wasn't found:** it needs Windows 11 (version 22H2 or later). Your IT department may also have turned it off.
 * **"User-defined type not defined" on `CUIAutomation`:** in the VBA editor, tick **UIAutomationClient** under **Tools > References**.
 * **The transcript only has the other people's words:** turn on **Include microphone audio** in Live Captions' preferences.
@@ -293,4 +372,4 @@ Folder colors, save locations and the last folder you moved mail to are stored i
 
 ## Uninstall
 
-In the VBA editor, right-click the `NVS_mail` module, the `NVS_mail_Dialog` form and (if you added it) `NVS_mail_Transcribe`, choose **Remove...** (answer No to exporting), and delete the NVS_mail code (everything with `nvs` or `NVS_` in it) from ThisOutlookSession. Delete the registry key above. Optionally delete the `Folder: ...` categories in **Categorize > All Categories**.
+In the VBA editor, right-click the `NVS_mail` module, the `NVS_mail_Dialog` form and (if you added them) `NVS_mail_Transcribe` and `NVS_mail_Search`, choose **Remove...** (answer No to exporting), and delete the NVS_mail code (everything with `nvs` or `NVS_` in it) from ThisOutlookSession. Delete the registry key above. Optionally delete the `Folder: ...` categories in **Categorize > All Categories**.

@@ -1,0 +1,2549 @@
+'==============================================================================
+' NVS_mail - optional file 5:  NVS_mail_Search   (UserForm)
+'
+' A faster, more complete search window for Outlook mail.
+'
+' HOW TO ADD (once): in the VBA editor (Alt+F11) choose Insert > UserForm.
+' Press F4 and change (Name) to  NVS_mail_Search  . Right-click the form >
+' View Code, delete anything already there, then paste this whole file.
+' Leave the form blank - this code builds the window itself. Then add the
+' macro NVS_Search (it's in file 1) to the ribbon or Quick Access Toolbar.
+'
+' How it works: the first time you open it, it reads the subject, people,
+' date and folder of every email on this PC straight from your mail folders -
+' not from Windows' search index - and keeps that list in memory. Searching
+' the list is instant and complete. Message text is searched on request,
+' through Windows' index.
+'==============================================================================
+Option Explicit
+
+'------------------------------------------------------------------------------
+' SETTINGS - change these to taste
+'------------------------------------------------------------------------------
+
+' Results listed at first. "Show more" lists four times as many.
+Private Const SEARCH_SHOW_ROWS As Long = 500
+
+' 0 = read all the mail on this PC. 24 = only the last two years, and so on
+' (opens faster and uses less memory on very large mailboxes).
+Private Const SEARCH_MONTHS_BACK As Long = 0
+
+' Also match the sender's email address, so a company name finds everyone
+' @thatcompany. Set to False if the first read of your mail is slow.
+Private Const SEARCH_SENDER_ADDRESS As Boolean = True
+
+' Stop reading beyond this many emails.
+Private Const SEARCH_MAX_EMAILS As Long = 400000
+
+' Most message-text matches taken from Windows' index for one search.
+Private Const TEXT_MAX_RESULTS As Long = 3000
+
+'------------------------------------------------------------------------------
+' Internals
+'------------------------------------------------------------------------------
+Private Const UI_FONT As String = "Segoe UI"
+Private Const CHUNK As Long = 500            ' rows read from a folder in one go
+Private Const WHEN_CUSTOM As Long = 8        ' position of "Custom dates..." in the When list
+
+Private Const KIND_MAIL As Long = 0
+Private Const KIND_SENT As Long = 1          ' Sent Items, Drafts: the list shows who it went to
+Private Const KIND_DELETED As Long = 2
+Private Const KIND_JUNK As Long = 3
+Private Const KIND_SKIP As Long = 9          ' Outbox, Sync Issues, RSS: never read
+
+Private Const PR_ENTRYID As String = "http://schemas.microsoft.com/mapi/proptag/0x0FFF0102"
+Private Const PR_PARENT_ENTRYID As String = "http://schemas.microsoft.com/mapi/proptag/0x0E090102"
+Private Const PR_MESSAGE_FLAGS As String = "http://schemas.microsoft.com/mapi/proptag/0x0E070003"
+Private Const PR_CONVERSATION_ID As String = "http://schemas.microsoft.com/mapi/proptag/0x30130102"
+Private Const PR_ATTR_HIDDEN As String = "http://schemas.microsoft.com/mapi/proptag/0x10F4000B"
+' True on emails whose only attachments are pictures in the body.
+Private Const PS_SMART_NO_ATTACH As String = _
+    "http://schemas.microsoft.com/mapi/id/{00062008-0000-0000-C000-000000000046}/8514000B"
+
+Private Const F_BODY As String = "urn:schemas:httpmail:textdescription"
+Private Const F_SUBJECT As String = "urn:schemas:httpmail:subject"
+Private Const F_FROM As String = "urn:schemas:httpmail:fromname"
+Private Const F_TO As String = "urn:schemas:httpmail:displayto"
+Private Const F_CC As String = "urn:schemas:httpmail:displaycc"
+
+' Window placement and resizing
+Private Type NvsRect
+    Left As Long
+    Top As Long
+    Right As Long
+    Bottom As Long
+End Type
+
+Private Type NvsMonitorInfo
+    cbSize As Long
+    rcMonitor As NvsRect
+    rcWork As NvsRect
+    dwFlags As Long
+End Type
+
+Private Const GWL_STYLE As Long = -16
+Private Const WS_THICKFRAME As Long = &H40000
+Private Const SWP_NOSIZE As Long = &H1
+Private Const SWP_NOMOVE As Long = &H2
+Private Const SWP_NOZORDER As Long = &H4
+Private Const SWP_NOACTIVATE As Long = &H10
+Private Const SWP_FRAMECHANGED As Long = &H20
+
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
+Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
+Private Declare PtrSafe Function IsWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
+Private Declare PtrSafe Function FindWindowW Lib "user32" (ByVal lpClassName As LongPtr, _
+    ByVal lpWindowName As LongPtr) As LongPtr
+Private Declare PtrSafe Function GetWindowRect Lib "user32" (ByVal hWnd As LongPtr, ByRef lpRect As NvsRect) As Long
+Private Declare PtrSafe Function SetWindowPos Lib "user32" (ByVal hWnd As LongPtr, ByVal hWndInsertAfter As LongPtr, _
+    ByVal X As Long, ByVal Y As Long, ByVal cx As Long, ByVal cy As Long, ByVal uFlags As Long) As Long
+Private Declare PtrSafe Function MonitorFromWindow Lib "user32" (ByVal hWnd As LongPtr, ByVal dwFlags As Long) As LongPtr
+Private Declare PtrSafe Function GetMonitorInfoW Lib "user32" (ByVal hMonitor As LongPtr, _
+    ByRef lpmi As NvsMonitorInfo) As Long
+#If Win64 Then
+Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long) As LongPtr
+Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
+#Else
+Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" Alias "GetWindowLongW" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long) As LongPtr
+Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" Alias "SetWindowLongW" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
+#End If
+
+' Controls
+Private WithEvents mApp As Outlook.Application       ' tells us when a message-text search finishes
+Private WithEvents cboQuery As MSForms.ComboBox
+Private WithEvents txtFrom As MSForms.TextBox
+Private WithEvents txtTo As MSForms.TextBox
+Private WithEvents cboWhen As MSForms.ComboBox
+Private WithEvents cboWhere As MSForms.ComboBox
+Private WithEvents btnClear As MSForms.CommandButton
+Private WithEvents chkAtt As MSForms.CheckBox
+Private WithEvents chkUnread As MSForms.CheckBox
+Private WithEvents chkChain As MSForms.CheckBox
+Private WithEvents chkTrash As MSForms.CheckBox
+Private WithEvents btnMore As MSForms.CommandButton
+Private WithEvents lstResults As MSForms.ListBox
+Private WithEvents btnOpen As MSForms.CommandButton
+Private WithEvents btnGoTo As MSForms.CommandButton
+Private WithEvents btnChain As MSForms.CommandButton
+Private WithEvents btnText As MSForms.CommandButton
+Private WithEvents btnOutlook As MSForms.CommandButton
+Private WithEvents btnClose As MSForms.CommandButton
+Private lblStatus As MSForms.Label
+Private lblPreview As MSForms.Label
+Private lblHFolder As MSForms.Label
+
+Private mBuilt As Boolean            ' the window's controls exist and are set up
+Private mControls As Boolean         ' the controls exist (set a little earlier than mBuilt)
+Private mSizable As Boolean
+Private mIgnore As Boolean           ' True while the code itself changes a control
+Private mHint As Boolean             ' the how-to text is still showing under the list
+Private mPreviewBody As Boolean      ' the preview is showing the selected email's text
+
+' The list of mail: one row per email. Rows are only ever added at the end; a
+' row that's no longer wanted is marked dead and tidied away later.
+Private mN As Long                   ' rows in use (live, dead and temporary)
+Private mCap As Long                 ' rows there is room for
+Private mDead As Long
+Private mSubj() As String
+Private mWho() As String             ' sender - or "To: ..." in Sent Items
+Private mHay() As String             ' lower case: subject <Tab> sender <Tab> recipients
+Private mEid() As String             ' EntryID (its bytes, two to a character - or hex text)
+Private mConv() As String            ' conversation (chain) ID
+Private mDate() As Date
+Private mFolder() As Long            ' folder number; -1 = dead; -2 and below = temporary row (see FolderOf)
+Private mFlags() As Byte             ' 1 = has a real attachment, 2 = unread
+
+Private mOrder() As Long             ' rows 0..mSortedN-1 that are live, newest first
+Private mOrderN As Long
+Private mSortedN As Long             ' rows from here on aren't in mOrder yet
+
+' Folders
+Private mFN As Long
+Private mFCap As Long
+Private mFId() As String
+Private mFStore() As String
+Private mFPath() As String           ' "Inbox\Clients\Acme"
+Private mFLow() As String            ' the same in lower case, for the Folder box
+Private mFShow() As String           ' "Acme  (Inbox\Clients)" for the results list
+Private mFKind() As Long
+Private mFCount() As Long            ' emails in it when its rows were read; -1 = not read; -2 = couldn't be read
+Private mFNow() As Long              ' emails in it at the last look
+Private mFDirty() As Boolean         ' NVS_mail saw mail arrive in it or leave it
+Private mFGone() As Boolean          ' the folder no longer exists
+Private mFSeen() As Long
+Private mFIdx As Object              ' folder EntryID -> folder number
+Private mStores As Object            ' StoreID -> text added to its folders' names
+Private mParent As Object            ' parent-folder key from a table -> folder number
+Private mWalkGen As Long
+Private mWalked As Long
+Private mInboxF As Long
+Private mSentF As Long
+Private mDefStore As String
+Private mRootPath As String
+
+' Keeping the list up to date
+Private mLoading As Boolean
+Private mAgain As Boolean
+Private mAgainFull As Boolean
+Private mAnyDirty As Boolean
+Private mWalkWanted As Boolean
+Private mLastWalk As Single
+Private mLastYield As Single
+Private mLoadedAt As Date
+Private mLoadingWhat As String
+Private mNote As String
+Private mCapped As Boolean
+Private mRowByRow As Boolean         ' Table.GetArray isn't usable here: read one row at a time
+Private mCrit As String
+Private mAddrChecked As Boolean      ' the cost of reading sender addresses has been timed
+Private mSkipAddr As Boolean         ' ...and was too high: they're left out
+
+' The current search
+Private mQPos() As String
+Private mQPosN As Long
+Private mQNeg() As String
+Private mQNegN As Long
+Private mQFrom() As String
+Private mQFromN As Long
+Private mQTo() As String
+Private mQToN As Long
+Private mQUseDate As Boolean
+Private mQD0 As Date
+Private mQD1 As Date
+Private mQAtt As Boolean
+Private mQUnread As Boolean
+Private mQFolderOK() As Boolean
+Private mCustom0 As Date
+Private mCustom1 As Date
+Private mChainMode As Boolean
+Private mChainKey As String
+
+Private mHit() As Long               ' matching rows, newest first
+Private mHitN As Long
+Private mDisp() As Long              ' the row shown on each line of the list
+Private mDispCnt() As Long           ' emails that line stands for ("one per chain")
+Private mDispN As Long
+Private mUnits As Long               ' emails, or chains, that could be listed
+Private mShowMax As Long
+
+' Message-text search (through Windows' index)
+Private mSearch As Outlook.Search
+Private mTextBusy As Boolean
+Private mTextTag As String
+Private mTextNote As String
+Private mTextSeq As Long
+Private mTmpFirst As Long            ' temporary rows holding text matches: first and last
+Private mTmpLast As Long
+
+'==============================================================================
+' Opening the window
+'==============================================================================
+
+Private Sub UserForm_Initialize()
+    mTmpFirst = -1
+    mTmpLast = -1
+    mInboxF = -1
+    mSentF = -1
+    mShowMax = SEARCH_SHOW_ROWS
+End Sub
+
+' Called by the NVS_Search macro (file 1): shows the window and brings its
+' list of mail up to date.
+Public Sub ShowSearch()
+    Dim owner As LongPtr
+    On Error GoTo Fail
+    owner = GetForegroundWindow()           ' the Outlook window you're working in
+    If Not mBuilt Then BuildUI
+    If Not Me.Visible Then
+        Me.Show vbModeless
+        PlaceWindow owner
+    End If
+    FillWhere
+    cboQuery.SetFocus
+    cboQuery.SelStart = 0
+    cboQuery.SelLength = Len(cboQuery.Text)
+    SetStatus
+    EnsureFresh False
+    Exit Sub
+Fail:
+    MsgBox "The Search window couldn't open: " & Err.Description, vbExclamation, "NVS_mail"
+End Sub
+
+Private Sub BuildUI()
+    Dim lbl As MSForms.Label, w As Long, h As Long
+
+    Me.Caption = "Search Mail"
+    SizeForm 640, 440
+    mIgnore = True
+
+    Set lbl = NewLabel(8, 9, 38, 12, "Search")
+    Set cboQuery = NewCombo(48, 6, 584)
+    cboQuery.ControlTipText = "Words from the subject or people's names, in any order.   ""exact phrase""   -exclude"
+
+    Set lbl = NewLabel(8, 33, 38, 12, "From")
+    Set txtFrom = NewTextBox(48, 30, 96)
+    txtFrom.ControlTipText = "Part of the sender's name or email address"
+    Set lbl = NewLabel(150, 33, 16, 12, "To")
+    Set txtTo = NewTextBox(168, 30, 96)
+    txtTo.ControlTipText = "Part of the name of someone on the To or Cc line"
+    Set lbl = NewLabel(270, 33, 30, 12, "When")
+    Set cboWhen = NewCombo(302, 30, 100)
+    With cboWhen
+        .Style = 2                          ' pick from the list only
+        .AddItem "Any time"
+        .AddItem "Today"
+        .AddItem "Last 7 days"
+        .AddItem "Last 30 days"
+        .AddItem "Last 3 months"
+        .AddItem "Last 12 months"
+        .AddItem "This year"
+        .AddItem "Last year"
+        .AddItem "Custom dates..."
+        .ListIndex = 0
+    End With
+    Set lbl = NewLabel(408, 33, 34, 12, "Folder")
+    Set cboWhere = NewCombo(444, 30, 140)
+    cboWhere.ControlTipText = "Pick one, or type part of a folder's name. Its subfolders are included."
+    cboWhere.Text = "All folders"
+    Set btnClear = NewButton(590, 29, 42, 20, "Clear")
+    btnClear.ControlTipText = "Empty every box"
+
+    Set chkAtt = NewCheck(48, 53, 96, "Has attachments")
+    chkAtt.ControlTipText = "Real attachments only - not pictures in a signature"
+    Set chkUnread = NewCheck(148, 53, 56, "Unread")
+    Set chkChain = NewCheck(208, 53, 88, "One per chain")
+    chkChain.ControlTipText = "List only the newest email of each chain"
+    Set chkTrash = NewCheck(300, 53, 140, "Include Deleted and Junk")
+    Set btnMore = NewButton(554, 52, 78, 20, "Show more")
+    btnMore.Visible = False
+
+    Set lbl = NewLabel(10, 76, 22, 12, "Att.")
+    lbl.ForeColor = RGB(96, 96, 96)
+    Set lbl = NewLabel(33, 76, 70, 12, "Date")
+    lbl.ForeColor = RGB(96, 96, 96)
+    Set lbl = NewLabel(107, 76, 100, 12, "From / To")
+    lbl.ForeColor = RGB(96, 96, 96)
+    Set lbl = NewLabel(219, 76, 100, 12, "Subject")
+    lbl.ForeColor = RGB(96, 96, 96)
+    Set lblHFolder = NewLabel(480, 76, 100, 12, "Folder")
+    lblHFolder.ForeColor = RGB(96, 96, 96)
+
+    Set lstResults = Me.Controls.Add("Forms.ListBox.1")
+    With lstResults
+        .Left = 8
+        .Top = 90
+        .Width = 624
+        .Height = 210
+        .IntegralHeight = False
+        .ColumnCount = 5
+        .MatchEntry = 2                     ' none: typing goes to the Search box
+        .Font.Name = UI_FONT
+        .Font.Size = 9
+    End With
+
+    Set lblPreview = NewLabel(8, 304, 624, 100, "")
+    With lblPreview
+        .BackStyle = 1
+        .BackColor = RGB(255, 255, 255)
+        .BorderStyle = 1
+        .BorderColor = RGB(200, 200, 200)
+        .WordWrap = True
+    End With
+
+    Set lblStatus = NewLabel(8, 411, 230, 24, "")
+    lblStatus.Font.Size = 8
+    lblStatus.ForeColor = RGB(96, 96, 96)
+    lblStatus.WordWrap = True
+
+    Set btnOpen = NewButton(250, 412, 74, 22, "Open")
+    btnOpen.Accelerator = "O"
+    btnOpen.ControlTipText = "Open the selected email (Enter, or double-click)"
+    Set btnGoTo = NewButton(328, 412, 74, 22, "Go to folder")
+    btnGoTo.Accelerator = "G"
+    btnGoTo.ControlTipText = "Show the selected email in its folder (Ctrl+Enter)"
+    Set btnChain = NewButton(406, 412, 74, 22, "Whole chain")
+    btnChain.Accelerator = "W"
+    btnChain.ControlTipText = "List every email in the selected email's chain"
+    Set btnText = NewButton(484, 412, 74, 22, "Search text")
+    btnText.Accelerator = "T"
+    btnText.ControlTipText = "Also look inside the emails' text, using Windows' index"
+    Set btnOutlook = NewButton(562, 412, 74, 22, "In Outlook")
+    btnOutlook.Accelerator = "L"
+    btnOutlook.ControlTipText = "Run this search with Outlook's own search, across all folders"
+
+    Set btnClose = NewButton(-200, 0, 20, 20, "Close")     ' off screen: lets Esc close the window
+    btnClose.Cancel = True
+    btnClose.TabStop = False
+
+    w = Val(GetSetting("NVS_mail", "Window", "SearchWidth", "0"))
+    h = Val(GetSetting("NVS_mail", "Window", "SearchHeight", "0"))
+    If w >= 430 And h >= 300 Then
+        Me.Width = w
+        Me.Height = h
+    End If
+    mControls = True
+    Arrange
+
+    Set mApp = Application
+    LoadHistory
+    lblPreview.Caption = "Type to search every folder at once. Results appear as you type, newest first." & _
+        vbCrLf & vbCrLf & _
+        "    acme budget            both words, in the subject or the names of the people on the email" & vbCrLf & _
+        "    ""site visit""  -draft      an exact phrase, and leaving out a word" & vbCrLf & vbCrLf & _
+        "Enter opens the selected email. Ctrl+Enter shows it in its folder. Search text (Alt+T) also " & _
+        "looks inside the emails."
+    mHint = True
+    mIgnore = False
+    mBuilt = True
+End Sub
+
+' The Folder box's list: All folders, the folder on screen, Inbox, Sent Items.
+Private Sub FillWhere()
+    Dim keep As String, f As Outlook.Folder, p As String, k As Long
+    On Error Resume Next
+    keep = cboWhere.Text
+    mIgnore = True
+    cboWhere.Clear
+    cboWhere.AddItem "All folders"
+    Set f = Application.ActiveExplorer.CurrentFolder
+    If Not f Is Nothing Then
+        If f.DefaultItemType = olMailItem Then
+            p = Mid$(f.FolderPath, 3)
+            k = InStr(p, "\")
+            If k > 0 Then cboWhere.AddItem "Current: " & Mid$(p, k + 1)
+        End If
+    End If
+    cboWhere.AddItem Application.Session.GetDefaultFolder(olFolderInbox).Name
+    cboWhere.AddItem Application.Session.GetDefaultFolder(olFolderSentMail).Name
+    If keep = "" Then keep = "All folders"
+    cboWhere.Text = keep
+    mIgnore = False
+End Sub
+
+' Fits the controls to the window's current size.
+Private Sub Arrange()
+    Dim w As Single, h As Single, listH As Single, y As Single, subjW As Long
+    If Not mControls Then Exit Sub
+    w = Me.InsideWidth
+    h = Me.InsideHeight
+    If w < 420 Or h < 280 Then Exit Sub
+
+    cboQuery.Width = w - 56
+    btnClear.Left = w - 50
+    cboWhere.Width = w - 444 - 56
+    btnMore.Left = w - 86
+
+    listH = h - 90 - 4 - 100 - 36
+    If listH < 60 Then listH = 60
+    lstResults.Width = w - 16
+    lstResults.Height = listH
+    lblPreview.Top = 90 + listH + 4
+    lblPreview.Width = w - 16
+    lblPreview.Height = h - lblPreview.Top - 36
+
+    y = h - 28
+    btnOutlook.Left = w - 82
+    btnText.Left = w - 160
+    btnChain.Left = w - 238
+    btnGoTo.Left = w - 316
+    btnOpen.Left = w - 394
+    btnOutlook.Top = y
+    btnText.Top = y
+    btnChain.Top = y
+    btnGoTo.Top = y
+    btnOpen.Top = y
+    lblStatus.Top = y - 1
+    lblStatus.Width = w - 394 - 16
+
+    ' columns: attachment | date | from/to | subject | folder
+    subjW = CLng(w) - 16 - 22 - 74 - 112 - 132 - 20
+    If subjW < 80 Then subjW = 80
+    lstResults.ColumnWidths = "22 pt;74 pt;112 pt;" & subjW & " pt;132 pt"
+    lblHFolder.Left = 8 + 22 + 74 + 112 + subjW + 3
+End Sub
+
+Private Sub UserForm_Resize()
+    Arrange
+End Sub
+
+Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
+    If CloseMode = vbFormControlMenu Then
+        Cancel = True                       ' keep the list of mail for next time
+        CloseWindow
+    End If
+End Sub
+
+Private Sub btnClose_Click()
+    CloseWindow
+End Sub
+
+Private Sub CloseWindow()
+    On Error Resume Next
+    SaveSetting "NVS_mail", "Window", "SearchWidth", CStr(CLng(Me.Width))
+    SaveSetting "NVS_mail", "Window", "SearchHeight", CStr(CLng(Me.Height))
+    StopTextSearch
+    Me.Hide
+End Sub
+
+'------------------------------------------------------------------------------
+' Building blocks
+'------------------------------------------------------------------------------
+
+' Sets the size of the area inside the window's border.
+Private Sub SizeForm(ByVal insideW As Single, ByVal insideH As Single)
+    Me.Width = insideW + (Me.Width - Me.InsideWidth)
+    Me.Height = insideH + (Me.Height - Me.InsideHeight)
+End Sub
+
+Private Function NewLabel(ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single, _
+                          ByVal cap As String) As MSForms.Label
+    Dim c As MSForms.Label
+    Set c = Me.Controls.Add("Forms.Label.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = h
+    c.Caption = cap
+    c.BackStyle = 0                         ' transparent
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewLabel = c
+End Function
+
+Private Function NewButton(ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single, _
+                           ByVal cap As String) As MSForms.CommandButton
+    Dim c As MSForms.CommandButton
+    Set c = Me.Controls.Add("Forms.CommandButton.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = h
+    c.Caption = cap
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewButton = c
+End Function
+
+Private Function NewTextBox(ByVal l As Single, ByVal t As Single, ByVal w As Single) As MSForms.TextBox
+    Dim c As MSForms.TextBox
+    Set c = Me.Controls.Add("Forms.TextBox.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = 18
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewTextBox = c
+End Function
+
+' A box you can type in that also has a drop-down list.
+Private Function NewCombo(ByVal l As Single, ByVal t As Single, ByVal w As Single) As MSForms.ComboBox
+    Dim c As MSForms.ComboBox
+    Set c = Me.Controls.Add("Forms.ComboBox.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = 18
+    c.MatchEntry = 2                        ' none: no auto-complete from the list
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewCombo = c
+End Function
+
+Private Function NewCheck(ByVal l As Single, ByVal t As Single, ByVal w As Single, _
+                          ByVal cap As String) As MSForms.CheckBox
+    Dim c As MSForms.CheckBox
+    Set c = Me.Controls.Add("Forms.CheckBox.1")
+    c.Left = l
+    c.Top = t
+    c.Width = w
+    c.Height = 18
+    c.Caption = cap
+    c.Font.Name = UI_FONT
+    c.Font.Size = 9
+    Set NewCheck = c
+End Function
+
+' Centers the window on the Outlook window you were working in - on the same
+' screen, kept inside it - and lets it be resized.
+Private Sub PlaceWindow(ByVal owner As LongPtr)
+    Dim hForm As LongPtr, ownerRc As NvsRect, formRc As NvsRect, mi As NvsMonitorInfo
+    Dim hMon As LongPtr, w As Long, h As Long, x As Long, y As Long
+    Dim realCap As String, tmpCap As String, cls As String
+
+    On Error GoTo Done
+    realCap = Me.Caption
+    tmpCap = "NVS_mail_" & CStr(ObjPtr(Me))
+    cls = "ThunderDFrame"
+    Me.Caption = tmpCap
+    hForm = FindWindowW(StrPtr(cls), StrPtr(tmpCap))
+    Me.Caption = realCap
+    If hForm = 0 Then Exit Sub
+    If Not mSizable Then
+        MakeResizable hForm
+        mSizable = True
+    End If
+
+    If owner = 0 Or owner = hForm Then Exit Sub
+    If IsWindow(owner) = 0 Then Exit Sub
+    If GetWindowRect(owner, ownerRc) = 0 Then Exit Sub
+    If GetWindowRect(hForm, formRc) = 0 Then Exit Sub
+    w = formRc.Right - formRc.Left
+    h = formRc.Bottom - formRc.Top
+    x = ownerRc.Left + (ownerRc.Right - ownerRc.Left - w) \ 2
+    y = ownerRc.Top + (ownerRc.Bottom - ownerRc.Top - h) \ 2
+
+    hMon = MonitorFromWindow(owner, 2)              ' the screen Outlook is on
+    mi.cbSize = LenB(mi)
+    If GetMonitorInfoW(hMon, mi) <> 0 Then
+        If x + w > mi.rcWork.Right Then x = mi.rcWork.Right - w
+        If y + h > mi.rcWork.Bottom Then y = mi.rcWork.Bottom - h
+        If x < mi.rcWork.Left Then x = mi.rcWork.Left
+        If y < mi.rcWork.Top Then y = mi.rcWork.Top
+    End If
+    SetWindowPos hForm, 0, x, y, 0, 0, SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE
+Done:
+End Sub
+
+Private Sub MakeResizable(ByVal hForm As LongPtr)
+    Dim style As LongPtr
+    style = GetWindowLongPtrW(hForm, GWL_STYLE)
+    SetWindowLongPtrW hForm, GWL_STYLE, style Or WS_THICKFRAME
+    SetWindowPos hForm, 0, 0, 0, 0, 0, SWP_NOMOVE Or SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE Or SWP_FRAMECHANGED
+End Sub
+
+'==============================================================================
+' Typing, clicking and keys
+'==============================================================================
+
+Private Sub cboQuery_Change()
+    If mIgnore Then Exit Sub
+    LeaveChain
+    RunQuery False
+    If mAnyDirty Then EnsureFresh False     ' mail has arrived or moved: bring the list up to date
+End Sub
+
+Private Sub txtFrom_Change()
+    If mIgnore Then Exit Sub
+    LeaveChain
+    RunQuery False
+End Sub
+
+Private Sub txtTo_Change()
+    If mIgnore Then Exit Sub
+    LeaveChain
+    RunQuery False
+End Sub
+
+Private Sub cboWhen_Change()
+    If mIgnore Then Exit Sub
+    If cboWhen.ListIndex = WHEN_CUSTOM Then
+        If Not AskCustomDates() Then
+            mIgnore = True
+            cboWhen.ListIndex = 0
+            mIgnore = False
+        End If
+    End If
+    LeaveChain
+    RunQuery False
+End Sub
+
+Private Sub cboWhere_Change()
+    If mIgnore Then Exit Sub
+    LeaveChain
+    RunQuery False
+End Sub
+
+Private Sub chkAtt_Click()
+    If mIgnore Then Exit Sub
+    RunQuery False
+End Sub
+
+Private Sub chkUnread_Click()
+    If mIgnore Then Exit Sub
+    RunQuery False
+End Sub
+
+Private Sub chkChain_Click()
+    If mIgnore Then Exit Sub
+    RenderList False
+End Sub
+
+Private Sub chkTrash_Click()
+    If mIgnore Then Exit Sub
+    RunQuery False
+    EnsureFresh False                       ' reads Deleted Items and Junk the first time they're wanted
+End Sub
+
+Private Sub btnClear_Click()
+    mIgnore = True
+    cboQuery.Text = ""
+    txtFrom.Text = ""
+    txtTo.Text = ""
+    cboWhen.ListIndex = 0
+    cboWhere.Text = "All folders"
+    chkAtt.Value = False
+    chkUnread.Value = False
+    mIgnore = False
+    LeaveChain
+    RunQuery False
+    cboQuery.SetFocus
+End Sub
+
+Private Sub btnMore_Click()
+    mShowMax = mShowMax * 4
+    RenderList True
+End Sub
+
+Private Sub btnOpen_Click()
+    OpenSelected
+End Sub
+
+Private Sub btnGoTo_Click()
+    GoToSelected
+End Sub
+
+Private Sub btnChain_Click()
+    ToggleChain
+End Sub
+
+Private Sub btnText_Click()
+    StartTextSearch
+End Sub
+
+Private Sub btnOutlook_Click()
+    RunInOutlook
+End Sub
+
+Private Sub cboQuery_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    BoxKey KeyCode, Shift
+End Sub
+
+Private Sub txtFrom_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    BoxKey KeyCode, Shift
+End Sub
+
+Private Sub txtTo_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    BoxKey KeyCode, Shift
+End Sub
+
+' Keys that work from the boxes at the top: Enter opens the selected email
+' (Ctrl+Enter shows it in its folder) - or, when nothing matched, searches
+' the message text; the arrow and Page keys move through the results.
+Private Sub BoxKey(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Select Case KeyCode
+        Case vbKeyReturn
+            KeyCode = 0
+            If (Shift And 2) <> 0 Then
+                GoToSelected
+            ElseIf mDispN > 0 Then
+                OpenSelected
+            Else
+                StartTextSearch
+            End If
+        Case vbKeyDown
+            KeyCode = 0
+            MoveSel 1
+        Case vbKeyUp
+            KeyCode = 0
+            MoveSel -1
+        Case vbKeyPageDown
+            KeyCode = 0
+            MoveSel 12
+        Case vbKeyPageUp
+            KeyCode = 0
+            MoveSel -12
+        Case vbKeyF5
+            KeyCode = 0
+            EnsureFresh True
+    End Select
+End Sub
+
+Private Sub MoveSel(ByVal delta As Long)
+    Dim r As Long
+    If mDispN = 0 Then Exit Sub
+    r = lstResults.ListIndex + delta
+    If r < 0 Then r = 0
+    If r > mDispN - 1 Then r = mDispN - 1
+    If r = lstResults.ListIndex Then
+        ShowPreview True
+    Else
+        lstResults.ListIndex = r            ' shows its preview through lstResults_Change
+    End If
+End Sub
+
+Private Sub lstResults_Change()
+    If mIgnore Then Exit Sub
+    ShowPreview True
+End Sub
+
+Private Sub lstResults_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
+    OpenSelected
+End Sub
+
+Private Sub lstResults_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Select Case KeyCode
+        Case vbKeyReturn
+            KeyCode = 0
+            If (Shift And 2) <> 0 Then GoToSelected Else OpenSelected
+        Case vbKeyF5
+            KeyCode = 0
+            EnsureFresh True
+    End Select
+End Sub
+
+' Typing while the results have the focus goes into the Search box.
+Private Sub lstResults_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
+    If KeyAscii >= 32 Then
+        cboQuery.SetFocus
+        cboQuery.Text = cboQuery.Text & Chr$(KeyAscii)
+        cboQuery.SelStart = Len(cboQuery.Text)
+        KeyAscii = 0
+    End If
+End Sub
+
+' Asks for the two dates of "Custom dates...". False if cancelled.
+Private Function AskCustomDates() As Boolean
+    Dim s As String, d0 As Date, d1 As Date, def As String
+
+    If mCustom0 <> 0 Then def = Format$(mCustom0, "Short Date")
+    s = InputBox("Show emails from this date on (leave blank for no start date):", "Custom dates", def)
+    If StrPtr(s) = 0 Then Exit Function
+    s = Trim$(s)
+    If s <> "" Then
+        If Not IsDate(s) Then
+            MsgBox "'" & s & "' isn't a date.", vbExclamation, "NVS_mail"
+            Exit Function
+        End If
+        d0 = DateValue(CDate(s))
+    End If
+
+    def = ""
+    If mCustom1 <> 0 Then def = Format$(mCustom1 - 1, "Short Date")
+    s = InputBox("...up to and including this date (leave blank for today):", "Custom dates", def)
+    If StrPtr(s) = 0 Then Exit Function
+    s = Trim$(s)
+    If s <> "" Then
+        If Not IsDate(s) Then
+            MsgBox "'" & s & "' isn't a date.", vbExclamation, "NVS_mail"
+            Exit Function
+        End If
+        d1 = DateValue(CDate(s)) + 1
+    End If
+    If d0 = 0 And d1 = 0 Then Exit Function
+
+    mCustom0 = d0
+    mCustom1 = d1
+    If d0 <> 0 Then s = Format$(d0, "Short Date") Else s = "start"
+    If d1 <> 0 Then s = s & " - " & Format$(d1 - 1, "Short Date") Else s = s & " - today"
+    mIgnore = True
+    cboWhen.List(WHEN_CUSTOM) = "Custom: " & s
+    cboWhen.ListIndex = WHEN_CUSTOM
+    mIgnore = False
+    AskCustomDates = True
+End Function
+
+'==============================================================================
+' Keeping the list of mail up to date
+'   Folders are read once. After that only folders whose mail has changed are
+'   read again: ones whose number of emails is different, and ones NVS_mail
+'   saw mail arrive in or leave. F5 reads everything again from scratch.
+'   Reading happens in small steps, so you can search while it goes on.
+'==============================================================================
+
+Private Sub EnsureFresh(ByVal full As Boolean)
+    If mLoading Then                        ' already at it: go round once more when done
+        mAgain = True
+        If full Then mAgainFull = True
+        Exit Sub
+    End If
+    mLoading = True
+    Do
+        mAgain = False
+        If mAgainFull Then full = True
+        mAgainFull = False
+        RefreshOnce full
+        full = False
+    Loop While mAgain
+    mLoading = False
+    SetStatus
+End Sub
+
+Private Sub RefreshOnce(ByVal full As Boolean)
+    Dim queue() As Long, drop() As Boolean, n As Long, k As Long, fi As Long, pass As Long
+    Dim wantTrash As Boolean, anyDrop As Boolean, firstRead As Boolean, pick As Boolean, t As Single
+
+    On Error GoTo Fail
+    mNote = ""
+    If full Then ResetCache
+    firstRead = (mN = 0)
+    If SEARCH_MONTHS_BACK > 0 Then
+        mCrit = "[ReceivedTime] >= '" & Format$(DateAdd("m", -SEARCH_MONTHS_BACK, Date), "ddddd h:nn AMPM") & "'"
+    Else
+        mCrit = ""
+    End If
+
+    t = Timer
+    If full Or mFN = 0 Or mWalkWanted Or t < mLastWalk Or t - mLastWalk > 30 Then
+        mNote = "Checking your folders..."
+        SetStatus
+        mWalkWanted = False
+        WalkFolders
+        mLastWalk = Timer
+        mNote = ""
+    End If
+    mAnyDirty = False
+    wantTrash = (chkTrash.Value = True)
+    If Not mAddrChecked Then
+        mNote = "Getting ready..."
+        SetStatus
+        ProbeAddressCost
+        mNote = ""
+    End If
+
+    ' What needs reading: Inbox first, then Sent Items, then everything else.
+    ReDim queue(0 To mFN + 1)
+    ReDim drop(0 To mFN + 1)
+    For pass = 1 To 3
+        For fi = 0 To mFN - 1
+            Select Case pass
+                Case 1: pick = (fi = mInboxF)
+                Case 2: pick = (fi = mSentF)
+                Case Else: pick = (fi <> mInboxF And fi <> mSentF)
+            End Select
+            If pick Then
+                If NeedsRead(fi, wantTrash) Then
+                    queue(n) = fi
+                    n = n + 1
+                End If
+            End If
+        Next
+    Next
+
+    ' Forget the rows of folders about to be read again, and of folders that have gone.
+    For fi = 0 To mFN - 1
+        If mFGone(fi) And mFCount(fi) >= 0 Then
+            drop(fi) = True
+            mFCount(fi) = -1
+            anyDrop = True
+        End If
+    Next
+    For k = 0 To n - 1
+        If mFCount(queue(k)) >= 0 Then
+            drop(queue(k)) = True
+            anyDrop = True
+        End If
+    Next
+    If anyDrop Then DropRows drop
+
+    mCapped = False
+    For k = 0 To n - 1
+        LoadFolder queue(k)
+        If firstRead Then
+            ' The first read takes a few seconds: list what there is as it comes in.
+            If k = 0 Or mN - mSortedN > 20000 Then
+                RebuildOrder
+                If lstResults.ListIndex <= 0 Then RunQuery True
+            End If
+        End If
+    Next
+
+    If n > 0 Or anyDrop Then
+        RebuildOrder
+        If mDead > 20000 And mDead > mN \ 4 Then Compact
+        mLoadedAt = Now
+        mLoadingWhat = ""
+        RunQuery True
+    ElseIf mLoadedAt = 0 Then
+        mLoadedAt = Now
+    End If
+    Exit Sub
+Fail:
+    mNote = "Couldn't read your mail: " & Err.Description
+    mIgnore = False
+End Sub
+
+Private Function NeedsRead(ByVal fi As Long, ByVal wantTrash As Boolean) As Boolean
+    If mFGone(fi) Then Exit Function
+    If mFCount(fi) = -2 Then Exit Function              ' couldn't be read: left alone until F5
+    If mFKind(fi) = KIND_DELETED Or mFKind(fi) = KIND_JUNK Then
+        If Not wantTrash Then Exit Function
+    End If
+    If mFCount(fi) = -1 Then
+        NeedsRead = True
+    ElseIf mFDirty(fi) Then
+        NeedsRead = True
+    Else
+        NeedsRead = (mFNow(fi) <> mFCount(fi))
+    End If
+End Function
+
+' Starts again from nothing (F5).
+Private Sub ResetCache()
+    StopTextSearch
+    mN = 0
+    mCap = 0
+    mDead = 0
+    Erase mSubj, mWho, mHay, mEid, mConv, mDate, mFolder, mFlags
+    mOrderN = 0
+    mSortedN = 0
+    Erase mOrder
+    mFN = 0
+    mFCap = 0
+    Erase mFId, mFStore, mFPath, mFLow, mFShow, mFKind, mFCount, mFNow, mFDirty, mFGone, mFSeen
+    Set mFIdx = Nothing
+    Set mParent = Nothing
+    mInboxF = -1
+    mSentF = -1
+    mTmpFirst = -1
+    mTmpLast = -1
+    mHitN = 0
+    mDispN = 0
+    mLoadedAt = 0
+End Sub
+
+' Called by NVS_mail (file 1) when it sees mail arrive in a folder or leave it.
+' "inbox" stands for the Inbox.
+Public Sub FolderChanged(ByVal folderID As String)
+    Dim fi As Long
+    On Error Resume Next
+    If mFN = 0 Or mFIdx Is Nothing Then Exit Sub
+    fi = -1
+    If folderID = "inbox" Then
+        fi = mInboxF
+    ElseIf mFIdx.Exists(folderID) Then
+        fi = mFIdx(folderID)
+    Else
+        mWalkWanted = True                  ' a folder the list doesn't know yet
+    End If
+    If fi >= 0 Then mFDirty(fi) = True
+    mAnyDirty = True
+End Sub
+
+'------------------------------------------------------------------------------
+' Finding the folders
+'------------------------------------------------------------------------------
+
+' Looks at every mail folder: notes new ones, renamed ones, ones that have
+' gone, and how many emails each has now.
+Private Sub WalkFolders()
+    Dim st As Outlook.Store, f As Outlook.Folder, fi As Long, k As Variant, sid As String
+
+    If mFIdx Is Nothing Then Set mFIdx = CreateObject("Scripting.Dictionary")
+    If mStores Is Nothing Then Set mStores = CreateObject("Scripting.Dictionary")
+    Set mParent = Nothing
+    mWalkGen = mWalkGen + 1
+    mDefStore = Application.Session.DefaultStore.StoreID
+    If Not mStores.Exists(mDefStore) Then mStores.Add mDefStore, ""
+
+    ' Also the mailbox of the folder on screen, if that's another one (a shared mailbox, say).
+    On Error Resume Next
+    Set f = Application.ActiveExplorer.CurrentFolder
+    If Not f Is Nothing Then
+        sid = f.StoreID
+        If sid <> "" Then
+            If Not mStores.Exists(sid) Then mStores.Add sid, "   [" & f.Store.DisplayName & "]"
+        End If
+    End If
+    On Error GoTo 0
+
+    For Each k In mStores.Keys
+        Set st = Nothing
+        On Error Resume Next
+        Set st = Application.Session.GetStoreFromID(CStr(k))
+        On Error GoTo 0
+        If Not st Is Nothing Then WalkStore st, CStr(mStores(k))
+    Next
+    For fi = 0 To mFN - 1
+        If mFSeen(fi) <> mWalkGen Then mFGone(fi) = True
+    Next
+End Sub
+
+Private Sub WalkStore(ByVal st As Outlook.Store, ByVal suffix As String)
+    Dim special As Object, ids As Variant, kinds As Variant, i As Long, df As Outlook.Folder
+    Dim root As Outlook.Folder, subs As Outlook.Folders, sid As String, inboxID As String, sentID As String
+
+    On Error GoTo Done
+    sid = st.StoreID
+    Set special = CreateObject("Scripting.Dictionary")
+    ids = Array(olFolderSentMail, olFolderDrafts, olFolderDeletedItems, olFolderJunk, olFolderOutbox, _
+                olFolderSyncIssues, olFolderConflicts, olFolderLocalFailures, olFolderServerFailures, _
+                olFolderRssFeeds)
+    kinds = Array(KIND_SENT, KIND_SENT, KIND_DELETED, KIND_JUNK, KIND_SKIP, _
+                  KIND_SKIP, KIND_SKIP, KIND_SKIP, KIND_SKIP, KIND_SKIP)
+    For i = 0 To UBound(ids)
+        Set df = Nothing
+        On Error Resume Next
+        Set df = st.GetDefaultFolder(ids(i))
+        On Error GoTo Done
+        If Not df Is Nothing Then
+            special(df.EntryID) = kinds(i)
+            If ids(i) = olFolderSentMail Then sentID = df.EntryID
+        End If
+    Next
+    Set df = Nothing
+    On Error Resume Next
+    Set df = st.GetDefaultFolder(olFolderInbox)
+    On Error GoTo Done
+    If Not df Is Nothing Then inboxID = df.EntryID
+    If sid <> mDefStore Then                ' only your own Inbox and Sent Items are read first
+        inboxID = ""
+        sentID = ""
+    End If
+
+    Set root = st.GetRootFolder
+    If sid = mDefStore Then mRootPath = root.FolderPath
+    Set subs = root.Folders
+    For i = 1 To subs.Count
+        WalkFolder subs.Item(i), 1, "", KIND_MAIL, sid, suffix, special, inboxID, sentID
+    Next
+Done:
+End Sub
+
+Private Sub WalkFolder(ByVal f As Outlook.Folder, ByVal depth As Long, ByVal parentPath As String, _
+                       ByVal kind As Long, ByVal storeID As String, ByVal suffix As String, _
+                       ByVal special As Object, ByVal inboxID As String, ByVal sentID As String)
+    Dim eid As String, nm As String, path As String, fi As Long, cnt As Long
+    Dim subs As Outlook.Folders, i As Long
+
+    On Error GoTo Done
+    If f.DefaultItemType <> olMailItem Then Exit Sub
+    eid = f.EntryID
+    If special.Exists(eid) Then kind = special(eid)     ' subfolders take after their parent
+    If kind = KIND_SKIP Then Exit Sub
+    If depth = 1 Then
+        If IsHidden(f) Then Exit Sub                     ' hidden system folders sit at the top
+    End If
+    nm = f.Name
+    If parentPath = "" Then path = nm Else path = parentPath & "\" & nm
+    cnt = f.Items.Count
+
+    If mFIdx.Exists(eid) Then fi = mFIdx(eid) Else fi = AddFolder(eid, storeID)
+    mFPath(fi) = path & suffix
+    mFLow(fi) = LCase$(path & suffix)
+    If parentPath = "" Then
+        mFShow(fi) = nm & suffix
+    Else
+        mFShow(fi) = nm & "  (" & parentPath & ")" & suffix
+    End If
+    mFKind(fi) = kind
+    mFNow(fi) = cnt
+    mFSeen(fi) = mWalkGen
+    mFGone(fi) = False
+    If eid = inboxID Then mInboxF = fi
+    If eid = sentID Then mSentF = fi
+
+    mWalked = mWalked + 1
+    If mWalked Mod 40 = 0 Then DoEvents
+
+    Set subs = f.Folders
+    For i = 1 To subs.Count
+        WalkFolder subs.Item(i), depth + 1, path, kind, storeID, suffix, special, inboxID, sentID
+    Next
+Done:
+End Sub
+
+Private Function AddFolder(ByVal eid As String, ByVal storeID As String) As Long
+    Dim c As Long
+    If mFN >= mFCap Then
+        c = mFCap * 2
+        If c < 256 Then c = 256
+        ReDim Preserve mFId(0 To c - 1)
+        ReDim Preserve mFStore(0 To c - 1)
+        ReDim Preserve mFPath(0 To c - 1)
+        ReDim Preserve mFLow(0 To c - 1)
+        ReDim Preserve mFShow(0 To c - 1)
+        ReDim Preserve mFKind(0 To c - 1)
+        ReDim Preserve mFCount(0 To c - 1)
+        ReDim Preserve mFNow(0 To c - 1)
+        ReDim Preserve mFDirty(0 To c - 1)
+        ReDim Preserve mFGone(0 To c - 1)
+        ReDim Preserve mFSeen(0 To c - 1)
+        mFCap = c
+    End If
+    mFId(mFN) = eid
+    mFStore(mFN) = storeID
+    mFCount(mFN) = -1
+    mFIdx.Add eid, mFN
+    AddFolder = mFN
+    mFN = mFN + 1
+End Function
+
+Private Function IsHidden(ByVal f As Outlook.Folder) As Boolean
+    On Error Resume Next
+    IsHidden = CBool(f.PropertyAccessor.GetProperty(PR_ATTR_HIDDEN))
+End Function
+
+' Reads one folder's emails into the list.
+Private Sub LoadFolder(ByVal fi As Long)
+    Dim f As Outlook.Folder, tbl As Outlook.Table, cnt As Long
+
+    On Error GoTo Fail
+    If mN - mDead >= SEARCH_MAX_EMAILS Then     ' the list is full: leave this folder for later
+        mCapped = True
+        mFCount(fi) = -1
+        Exit Sub
+    End If
+    mLoadingWhat = mFPath(fi)
+    Set f = Application.Session.GetFolderFromID(mFId(fi), mFStore(fi))
+    cnt = f.Items.Count
+    mFDirty(fi) = False                     ' anything that changes from here on flags it again
+    If cnt > 0 Then
+        If mCrit = "" Then Set tbl = f.GetTable() Else Set tbl = f.GetTable(mCrit)
+        ReadRows tbl, fi, False, 0, True
+    End If
+    mFCount(fi) = cnt
+    mFNow(fi) = cnt
+    Exit Sub
+Fail:
+    mFCount(fi) = -2                        ' couldn't be read: left out until F5
+End Sub
+
+'==============================================================================
+' Reading emails into the list
+'==============================================================================
+
+' Adds the emails in a table to the list, a few hundred at a time. Nothing is
+' opened: the subject, people, date and so on come straight from the table.
+'   fixedFolder - the number of the folder they're all in, or -1 to work out
+'                 each email's own folder (the results of a text search)
+'   temp        - temporary rows: shown in the results, never part of the list
+'   maxRows     - stop after this many (0 = no limit)
+'   background  - let the window breathe while reading
+' Returns how many were added.
+Private Function ReadRows(ByVal tbl As Outlook.Table, ByVal fixedFolder As Long, ByVal temp As Boolean, _
+                          ByVal maxRows As Long, ByVal background As Boolean) As Long
+    Dim cols As Outlook.Columns, arr As Variant, v As Variant
+    Dim cE As Long, cS As Long, cN As Long, cA As Long, cT As Long, cC As Long, cR As Long
+    Dim cM As Long, cF As Long, cV As Long, cH As Long, cP As Long, nCols As Long
+    Dim want As Long, got As Long, r As Long, i As Long, fi As Long, total As Long, lf As Long
+    Dim subj As String, nm As String, addr As String, toN As String, ccN As String
+    Dim d As Date, fl As Byte, t As Single
+
+    Set cols = tbl.Columns
+    cols.RemoveAll
+    cE = AddCol(cols, PR_ENTRYID)
+    If cE < 0 Then cE = AddCol(cols, "EntryID")
+    cS = AddCol(cols, "Subject")
+    cN = AddCol(cols, "SenderName")
+    cA = -1
+    If SEARCH_SENDER_ADDRESS And Not mSkipAddr Then cA = AddCol(cols, "SenderEmailAddress")
+    cT = AddCol(cols, "To")
+    cC = AddCol(cols, "CC")
+    cR = AddCol(cols, "ReceivedTime")
+    cM = AddCol(cols, "LastModificationTime")
+    cF = AddCol(cols, PR_MESSAGE_FLAGS)
+    cV = AddCol(cols, PR_CONVERSATION_ID)
+    cH = AddCol(cols, PS_SMART_NO_ATTACH)
+    cP = -1
+    If fixedFolder < 0 Then cP = AddCol(cols, PR_PARENT_ENTRYID)
+    nCols = cols.Count
+    If cE < 0 Or cS < 0 Then Exit Function
+    If fixedFolder < 0 And cP < 0 Then Exit Function
+
+    If temp Then
+        On Error Resume Next
+        tbl.Sort "[ReceivedTime]", True     ' newest first, so a cut-off keeps the latest
+        tbl.MoveToStart
+        On Error GoTo 0
+    End If
+
+    Do Until tbl.EndOfTable
+        want = CHUNK
+        If maxRows > 0 Then
+            If maxRows - total < want Then want = maxRows - total
+            If want <= 0 Then Exit Do
+        End If
+        got = NextChunk(tbl, want, nCols, arr)
+        If got <= 0 Then Exit Do
+
+        Grow mN + got
+        i = mN
+        For r = 0 To got - 1
+            fi = fixedFolder
+            If fi < 0 Then fi = ParentIndex(arr(r, cP))
+            If fi >= 0 Then
+                subj = ""
+                nm = ""
+                addr = ""
+                toN = ""
+                ccN = ""
+                v = arr(r, cS)
+                If VarType(v) = vbString Then subj = v
+                If cN >= 0 Then
+                    v = arr(r, cN)
+                    If VarType(v) = vbString Then nm = v
+                End If
+                If cA >= 0 Then
+                    v = arr(r, cA)
+                    If VarType(v) = vbString Then
+                        ' Only real addresses: Exchange's internal ones aren't worth matching.
+                        If InStr(v, "@") > 0 Then addr = v
+                    End If
+                End If
+                If cT >= 0 Then
+                    v = arr(r, cT)
+                    If VarType(v) = vbString Then toN = v
+                End If
+                If cC >= 0 Then
+                    v = arr(r, cC)
+                    If VarType(v) = vbString Then ccN = v
+                End If
+                If Len(toN) > 250 Then toN = Left$(toN, 250)
+                If Len(ccN) > 250 Then ccN = Left$(ccN, 250)
+
+                d = 0
+                If cR >= 0 Then
+                    v = arr(r, cR)
+                    If VarType(v) = vbDate Then d = v
+                End If
+                If d = 0 Or d > #1/1/4000# Then     ' drafts have no received time
+                    d = 0
+                    If cM >= 0 Then
+                        v = arr(r, cM)
+                        If VarType(v) = vbDate Then d = v
+                    End If
+                End If
+
+                fl = 0
+                If cF >= 0 Then
+                    v = arr(r, cF)
+                    If VarType(v) = vbLong Or VarType(v) = vbInteger Then
+                        lf = v
+                        If (lf And &H10) <> 0 Then fl = 1           ' has an attachment
+                        If (lf And 1) = 0 Then fl = fl Or 2         ' not read yet
+                    End If
+                End If
+                If cH >= 0 And (fl And 1) <> 0 Then
+                    v = arr(r, cH)
+                    If VarType(v) = vbBoolean Then
+                        If v Then fl = fl And 254       ' only pictures in the body: doesn't count
+                    End If
+                End If
+
+                If InStr(subj, vbTab) > 0 Then subj = Replace(subj, vbTab, " ")
+                If InStr(nm, vbTab) > 0 Then nm = Replace(nm, vbTab, " ")
+
+                mSubj(i) = subj
+                If mFKind(fi) = KIND_SENT Then mWho(i) = "To: " & Left$(toN, 60) Else mWho(i) = nm
+                mHay(i) = LCase$(subj & vbTab & nm & " " & addr & vbTab & toN & " " & ccN)
+                mEid(i) = BinStr(arr(r, cE))
+                If cV >= 0 Then mConv(i) = BinStr(arr(r, cV)) Else mConv(i) = vbNullString
+                mDate(i) = d
+                mFlags(i) = fl
+                If temp Then mFolder(i) = -2 - fi Else mFolder(i) = fi
+                i = i + 1
+            End If
+        Next
+        total = total + (i - mN)
+        mN = i
+
+        If background Then
+            t = Timer
+            If t < mLastYield Or t - mLastYield > 0.1 Then
+                SetStatus
+                DoEvents
+                mLastYield = Timer
+            End If
+        End If
+    Loop
+    ReadRows = total
+End Function
+
+' Reading each sender's email address can be slow on some PCs. Before the
+' first read, this times 1,000 emails of the biggest folder with and without
+' the address. If the address makes it over four times slower, addresses are
+' left out, so the list still loads quickly.
+Private Sub ProbeAddressCost()
+    Dim fi As Long, best As Long, f As Outlook.Folder, k As Long
+    Dim tbl As Outlook.Table, cols As Outlook.Columns, arr As Variant, t0 As Single, tm(0 To 1) As Single
+
+    mAddrChecked = True
+    If Not SEARCH_SENDER_ADDRESS Then Exit Sub
+    best = -1
+    For fi = 0 To mFN - 1
+        If Not mFGone(fi) And mFKind(fi) <> KIND_DELETED And mFKind(fi) <> KIND_JUNK Then
+            If best < 0 Then
+                best = fi
+            ElseIf mFNow(fi) > mFNow(best) Then
+                best = fi
+            End If
+        End If
+    Next
+    If best < 0 Then Exit Sub
+    If mFNow(best) < 1500 Then Exit Sub         ' a small mailbox reads quickly either way
+
+    On Error GoTo Done
+    Set f = Application.Session.GetFolderFromID(mFId(best), mFStore(best))
+    For k = 0 To 1                              ' 0 = without the address, 1 = with it
+        Set tbl = f.GetTable()
+        Set cols = tbl.Columns
+        cols.RemoveAll
+        cols.Add "Subject"
+        cols.Add "SenderName"
+        If k = 1 Then cols.Add "SenderEmailAddress"
+        If NextChunk(tbl, 200, cols.Count, arr) < 200 Then Exit Sub      ' warm up
+        t0 = Timer
+        If NextChunk(tbl, 1000, cols.Count, arr) < 1000 Then Exit Sub
+        tm(k) = Timer - t0
+        If tm(k) < 0 Then Exit Sub              ' midnight went by
+    Next
+    If tm(1) > 0.3 And tm(1) > 4 * tm(0) Then mSkipAddr = True
+Done:
+End Sub
+
+' Gets the next rows of a table as a grid (row, column) and returns how many.
+' Uses Table.GetArray - hundreds of rows in one call - and falls back to one
+' row at a time if this Outlook won't do that.
+Private Function NextChunk(ByVal tbl As Outlook.Table, ByVal want As Long, ByVal nCols As Long, _
+                           ByRef arr As Variant) As Long
+    Dim d1 As Long, d2 As Long, r As Long, c As Long, failed As Boolean
+    Dim grid() As Variant, vals As Variant, rw As Outlook.Row
+
+    If Not mRowByRow Then
+        d1 = -1
+        d2 = -1
+        On Error Resume Next
+        Err.Clear
+        arr = tbl.GetArray(want)
+        If Err.Number = 0 Then
+            d1 = UBound(arr, 1)
+            d2 = UBound(arr, 2)
+        End If
+        failed = (Err.Number <> 0)
+        Err.Clear
+        On Error GoTo 0
+        If Not failed Then
+            If d2 + 1 = nCols Then                      ' (row, column), as documented
+                NextChunk = d1 + 1
+                Exit Function
+            End If
+            If d1 + 1 = nCols Then                      ' the other way round: turn it
+                ReDim grid(0 To d2, 0 To d1)
+                For r = 0 To d2
+                    For c = 0 To d1
+                        grid(r, c) = arr(c, r)
+                    Next
+                Next
+                arr = grid
+                NextChunk = d2 + 1
+                Exit Function
+            End If
+        End If
+        ' GetArray isn't usable here. This can only happen on the very first read,
+        ' so starting this table again loses nothing.
+        mRowByRow = True
+        On Error Resume Next
+        tbl.MoveToStart
+        On Error GoTo 0
+    End If
+
+    ReDim grid(0 To want - 1, 0 To nCols - 1)
+    r = 0
+    Do While r < want
+        If tbl.EndOfTable Then Exit Do
+        Set rw = tbl.GetNextRow
+        If rw Is Nothing Then Exit Do
+        vals = rw.GetValues
+        For c = 0 To nCols - 1
+            grid(r, c) = vals(c)
+        Next
+        r = r + 1
+    Loop
+    arr = grid
+    NextChunk = r
+End Function
+
+' Adds a column to a table; returns its position, or -1 if Outlook refuses it.
+Private Function AddCol(ByVal cols As Outlook.Columns, ByVal colName As String) As Long
+    AddCol = -1
+    On Error GoTo Nope
+    cols.Add colName
+    AddCol = cols.Count - 1
+Nope:
+End Function
+
+' A binary value from a table as text: the bytes themselves, two to a
+' character (compact, and fine for comparing). Hex text is kept as it is.
+Private Function BinStr(ByRef v As Variant) As String
+    Dim b() As Byte
+    Select Case VarType(v)
+        Case vbString
+            BinStr = v
+        Case vbArray + vbByte
+            b = v
+            BinStr = b
+    End Select
+End Function
+
+' The hex text Outlook wants for an ID kept by BinStr.
+Private Function HexOf(ByVal s As String) As String
+    Dim b() As Byte, i As Long, h As String
+    If s = "" Then Exit Function
+    If Not s Like "*[!0-9A-Fa-f]*" Then                 ' already hex text
+        HexOf = s
+        Exit Function
+    End If
+    b = s
+    h = String$(2 * (UBound(b) + 1), "0")
+    For i = 0 To UBound(b)
+        If b(i) < 16 Then
+            Mid$(h, 2 * i + 2, 1) = Hex$(b(i))
+        Else
+            Mid$(h, 2 * i + 1, 2) = Hex$(b(i))
+        End If
+    Next
+    HexOf = h
+End Function
+
+' The folder number for a parent-folder value from a table (-1 = not a folder
+' in the list). Each folder is only looked up once.
+Private Function ParentIndex(ByRef v As Variant) As Long
+    Dim key As String, f As Outlook.Folder, id As String
+    ParentIndex = -1
+    key = BinStr(v)
+    If key = "" Then Exit Function
+    If mParent Is Nothing Then Set mParent = CreateObject("Scripting.Dictionary")
+    If mParent.Exists(key) Then
+        ParentIndex = mParent(key)
+        Exit Function
+    End If
+    On Error Resume Next
+    Set f = Application.Session.GetFolderFromID(HexOf(key), mDefStore)
+    If Not f Is Nothing Then id = f.EntryID
+    On Error GoTo 0
+    If id <> "" And Not mFIdx Is Nothing Then
+        If mFIdx.Exists(id) Then ParentIndex = mFIdx(id)
+    End If
+    mParent.Add key, ParentIndex
+End Function
+
+' Makes room for at least this many rows.
+Private Sub Grow(ByVal need As Long)
+    Dim c As Long
+    If need <= mCap Then Exit Sub
+    c = mCap * 2
+    If c < need Then c = need
+    If c < 8192 Then c = 8192
+    ReDim Preserve mSubj(0 To c - 1)
+    ReDim Preserve mWho(0 To c - 1)
+    ReDim Preserve mHay(0 To c - 1)
+    ReDim Preserve mEid(0 To c - 1)
+    ReDim Preserve mConv(0 To c - 1)
+    ReDim Preserve mDate(0 To c - 1)
+    ReDim Preserve mFolder(0 To c - 1)
+    ReDim Preserve mFlags(0 To c - 1)
+    mCap = c
+End Sub
+
+' Marks every row of the flagged folders dead.
+Private Sub DropRows(drop() As Boolean)
+    Dim i As Long, fi As Long
+    For i = 0 To mN - 1
+        fi = mFolder(i)
+        If fi >= 0 Then
+            If drop(fi) Then DropRow i
+        End If
+    Next
+End Sub
+
+Private Sub DropRow(ByVal i As Long)
+    mFolder(i) = -1
+    mSubj(i) = vbNullString
+    mWho(i) = vbNullString
+    mHay(i) = vbNullString
+    mEid(i) = vbNullString
+    mConv(i) = vbNullString
+    mDead = mDead + 1
+End Sub
+
+' Throws away the temporary rows of the last message-text search.
+Private Sub ClearTemp()
+    Dim i As Long
+    If mTmpFirst < 0 Then Exit Sub
+    For i = mTmpFirst To mTmpLast
+        If i < mN Then
+            If mFolder(i) <= -2 Then DropRow i
+        End If
+    Next
+    mTmpFirst = -1
+    mTmpLast = -1
+End Sub
+
+' The folder number of a row, whether it's a normal or a temporary one.
+Private Function FolderOf(ByVal i As Long) As Long
+    FolderOf = mFolder(i)
+    If FolderOf <= -2 Then FolderOf = -2 - FolderOf
+End Function
+
+'------------------------------------------------------------------------------
+' Newest-first order
+'------------------------------------------------------------------------------
+
+' Brings mOrder (the live rows, newest first) up to date: sorts the rows added
+' since last time and merges them in, dropping dead rows on the way.
+Private Sub RebuildOrder()
+    Dim tail() As Long, merged() As Long, nt As Long, a As Long, b As Long, k As Long, i As Long
+    Dim ia As Long, takeA As Boolean
+
+    ReDim tail(0 To mN - mSortedN + 1)
+    For i = mSortedN To mN - 1
+        If mFolder(i) >= 0 Then
+            tail(nt) = i
+            nt = nt + 1
+        End If
+    Next
+    If nt > 1 Then SortDesc tail, 0, nt - 1
+
+    ReDim merged(0 To mOrderN + nt + 1)
+    Do While a < mOrderN Or b < nt
+        If a < mOrderN Then
+            ia = mOrder(a)
+            If mFolder(ia) < 0 Then                     ' dead: leave it out
+                a = a + 1
+                GoTo NextOne
+            End If
+        End If
+        If a >= mOrderN Then
+            takeA = False
+        ElseIf b >= nt Then
+            takeA = True
+        Else
+            takeA = (mDate(ia) >= mDate(tail(b)))
+        End If
+        If takeA Then
+            merged(k) = ia
+            a = a + 1
+        Else
+            merged(k) = tail(b)
+            b = b + 1
+        End If
+        k = k + 1
+NextOne:
+    Loop
+    mOrder = merged
+    mOrderN = k
+    mSortedN = mN
+End Sub
+
+' Sorts row numbers a(lo..hi) by their emails' dates, newest first.
+Private Sub SortDesc(a() As Long, ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long, p As Date, t As Long
+    Do While lo < hi
+        i = lo
+        j = hi
+        p = mDate(a((lo + hi) \ 2))
+        Do
+            Do While mDate(a(i)) > p
+                i = i + 1
+            Loop
+            Do While mDate(a(j)) < p
+                j = j - 1
+            Loop
+            If i <= j Then
+                t = a(i)
+                a(i) = a(j)
+                a(j) = t
+                i = i + 1
+                j = j - 1
+            End If
+        Loop While i <= j
+        ' Sort the smaller part first, then carry on with the larger one.
+        If j - lo < hi - i Then
+            If lo < j Then SortDesc a, lo, j
+            lo = i
+        Else
+            If i < hi Then SortDesc a, i, hi
+            hi = j
+        End If
+    Loop
+End Sub
+
+' Squeezes the dead rows out of the list. Row numbers change, so the current
+' results are dropped: the caller runs the search again. Call it straight
+' after RebuildOrder.
+Private Sub Compact()
+    Dim map() As Long, i As Long, k As Long, x As Long, j As Long
+
+    ClearTemp
+    ReDim map(0 To mN)
+    For i = 0 To mN - 1
+        If mFolder(i) >= 0 Then
+            If k <> i Then
+                mSubj(k) = mSubj(i)
+                mWho(k) = mWho(i)
+                mHay(k) = mHay(i)
+                mEid(k) = mEid(i)
+                mConv(k) = mConv(i)
+                mDate(k) = mDate(i)
+                mFolder(k) = mFolder(i)
+                mFlags(k) = mFlags(i)
+            End If
+            map(i) = k
+            k = k + 1
+        Else
+            map(i) = -1
+        End If
+    Next
+    For i = k To mN - 1
+        mSubj(i) = vbNullString
+        mWho(i) = vbNullString
+        mHay(i) = vbNullString
+        mEid(i) = vbNullString
+        mConv(i) = vbNullString
+        mFolder(i) = -1
+    Next
+    For x = 0 To mOrderN - 1
+        If map(mOrder(x)) >= 0 Then
+            mOrder(j) = map(mOrder(x))
+            j = j + 1
+        End If
+    Next
+    mOrderN = j
+    mN = k
+    mSortedN = k
+    mDead = 0
+    mHitN = 0
+    mDispN = 0
+End Sub
+
+'==============================================================================
+' Searching the list
+'   Every word must be found - anywhere in the subject, the sender's name or
+'   address, or the To/Cc names - in any order, and anywhere inside a word.
+'   "Quoted words" must appear together. A leading minus leaves a word out.
+'==============================================================================
+
+' Works out the results for what's in the boxes now and lists them.
+'   keepSel - keep the same email selected (used when the list of mail was
+'             updated, rather than when you typed something)
+Private Sub RunQuery(ByVal keepSel As Boolean)
+    Dim total As Long, k As Long, i As Long, fi As Long, n As Long, tailHits As Boolean
+
+    If Not mBuilt Then Exit Sub
+    On Error GoTo Fail
+    If Not mLoading Then mNote = ""             ' an earlier problem has been seen by now
+    StopTextSearch
+    mTextNote = ""
+    ClearTemp
+    ReadCriteria
+
+    ReDim mHit(0 To mN + 1)
+    ' Rows already in date order first, then any read since the last sort.
+    total = mOrderN + (mN - mSortedN)
+    For k = 0 To total - 1
+        If k < mOrderN Then i = mOrder(k) Else i = mSortedN + (k - mOrderN)
+        fi = mFolder(i)
+        If fi >= 0 Then
+            If RowMatches(i, fi, True) Then
+                mHit(n) = i
+                n = n + 1
+                If k >= mOrderN Then tailHits = True
+            End If
+        End If
+    Next
+    mHitN = n
+    If tailHits And n > 1 Then SortDesc mHit, 0, n - 1
+    If Not keepSel Then mShowMax = SEARCH_SHOW_ROWS
+    RenderList keepSel
+    Exit Sub
+Fail:
+    mIgnore = False
+    mNote = "Search problem: " & Err.Description
+    SetStatus
+End Sub
+
+' Reads the boxes into the mQ... variables that RowMatches tests against.
+Private Sub ReadCriteria()
+    Dim fi As Long, t As String, wantTrash As Boolean, ok As Boolean
+
+    ParseWords cboQuery.Text, mQPos, mQPosN, mQNeg, mQNegN
+    SplitWords txtFrom.Text, mQFrom, mQFromN
+    SplitWords txtTo.Text, mQTo, mQToN
+    mQAtt = (chkAtt.Value = True)
+    mQUnread = (chkUnread.Value = True)
+
+    mQD0 = 0
+    mQD1 = 0
+    Select Case cboWhen.ListIndex
+        Case 1
+            mQD0 = Date
+        Case 2
+            mQD0 = Date - 7
+        Case 3
+            mQD0 = Date - 30
+        Case 4
+            mQD0 = DateAdd("m", -3, Date)
+        Case 5
+            mQD0 = DateAdd("yyyy", -1, Date)
+        Case 6
+            mQD0 = DateSerial(Year(Date), 1, 1)
+        Case 7
+            mQD0 = DateSerial(Year(Date) - 1, 1, 1)
+            mQD1 = DateSerial(Year(Date), 1, 1)
+        Case WHEN_CUSTOM
+            mQD0 = mCustom0
+            mQD1 = mCustom1
+    End Select
+    mQUseDate = (mQD0 <> 0 Or mQD1 <> 0)
+
+    ' Folder box: part of a folder's path (subfolders match too, as their path contains it).
+    t = LCase$(Trim$(cboWhere.Text))
+    If Left$(t, 9) = "current: " Then t = Mid$(t, 10)
+    If t = "all folders" Then t = ""
+    wantTrash = (chkTrash.Value = True)
+    ReDim mQFolderOK(0 To mFN + 1)
+    For fi = 0 To mFN - 1
+        ok = Not mFGone(fi)
+        If ok And Not wantTrash Then ok = (mFKind(fi) <> KIND_DELETED And mFKind(fi) <> KIND_JUNK)
+        If ok And t <> "" Then ok = (InStr(mFLow(fi), t) > 0)
+        mQFolderOK(fi) = ok
+    Next
+End Sub
+
+' Splits what was typed into words to find (pos) and words to leave out (neg).
+Private Sub ParseWords(ByVal s As String, ByRef pos() As String, ByRef nPos As Long, _
+                       ByRef neg() As String, ByRef nNeg As Long)
+    Dim i As Long, j As Long, n As Long, k As Long, ch As String, tok As String, isNeg As Boolean
+
+    ReDim pos(0 To 15)
+    ReDim neg(0 To 15)
+    nPos = 0
+    nNeg = 0
+    s = LCase$(s)
+    n = Len(s)
+    i = 1
+    Do While i <= n
+        ch = Mid$(s, i, 1)
+        If ch = " " Then
+            i = i + 1
+        Else
+            isNeg = False
+            If ch = "-" Then                            ' -word: leave it out
+                isNeg = True
+                i = i + 1
+                If i > n Then Exit Do
+                ch = Mid$(s, i, 1)
+            End If
+            If ch = """" Then                           ' "words kept together"
+                j = InStr(i + 1, s, """")
+                If j = 0 Then j = n + 1
+                tok = Mid$(s, i + 1, j - i - 1)
+                i = j + 1
+            Else
+                j = InStr(i, s, " ")
+                If j = 0 Then j = n + 1
+                tok = Mid$(s, i, j - i)
+                i = j
+            End If
+            tok = Trim$(tok)
+            If tok <> "" Then
+                If isNeg Then
+                    If nNeg <= 15 Then
+                        neg(nNeg) = tok
+                        nNeg = nNeg + 1
+                    End If
+                ElseIf nPos <= 15 Then
+                    pos(nPos) = tok
+                    nPos = nPos + 1
+                End If
+            End If
+        End If
+    Loop
+
+    ' Longest first: the rarest word rules most emails out soonest.
+    For i = 1 To nPos - 1
+        tok = pos(i)
+        k = i - 1
+        Do While k >= 0
+            If Len(pos(k)) >= Len(tok) Then Exit Do
+            pos(k + 1) = pos(k)
+            k = k - 1
+        Loop
+        pos(k + 1) = tok
+    Next
+End Sub
+
+Private Sub SplitWords(ByVal s As String, ByRef arr() As String, ByRef n As Long)
+    Dim parts() As String, i As Long
+    ReDim arr(0 To 15)
+    n = 0
+    parts = Split(LCase$(Trim$(s)), " ")
+    For i = 0 To UBound(parts)
+        If parts(i) <> "" And n <= 15 Then
+            arr(n) = parts(i)
+            n = n + 1
+        End If
+    Next
+End Sub
+
+' Nothing typed and no filter set (the Folder box aside).
+Private Function IsBlankQuery() As Boolean
+    IsBlankQuery = (mQPosN = 0 And mQNegN = 0 And mQFromN = 0 And mQToN = 0 And Not mQUseDate _
+                    And Not mQAtt And Not mQUnread And Not mChainMode)
+End Function
+
+' Does row i (in folder fi) fit the search? words = False skips the words
+' themselves: used for message-text matches, which Windows' index already
+' checked.
+Private Function RowMatches(ByVal i As Long, ByVal fi As Long, ByVal words As Boolean) As Boolean
+    Dim t As Long, p1 As Long, p2 As Long, q As Long
+
+    If mChainMode Then
+        RowMatches = (mConv(i) = mChainKey)
+        Exit Function
+    End If
+    If fi > UBound(mQFolderOK) Then Exit Function
+    If Not mQFolderOK(fi) Then Exit Function
+    If mQUseDate Then
+        If mDate(i) < mQD0 Then Exit Function
+        If mQD1 <> 0 And mDate(i) >= mQD1 Then Exit Function
+    End If
+    If mQAtt And (mFlags(i) And 1) = 0 Then Exit Function
+    If mQUnread And (mFlags(i) And 2) = 0 Then Exit Function
+
+    If words Then
+        For t = 0 To mQPosN - 1
+            If InStr(mHay(i), mQPos(t)) = 0 Then Exit Function
+        Next
+        For t = 0 To mQNegN - 1
+            If InStr(mHay(i), mQNeg(t)) > 0 Then Exit Function
+        Next
+    End If
+
+    If mQFromN > 0 Or mQToN > 0 Then
+        p1 = InStr(mHay(i), vbTab)                      ' end of the subject
+        p2 = InStr(p1 + 1, mHay(i), vbTab)              ' end of the sender
+        For t = 0 To mQFromN - 1
+            q = InStr(p1 + 1, mHay(i), mQFrom(t))
+            If q = 0 Or q > p2 Then Exit Function
+        Next
+        For t = 0 To mQToN - 1
+            If InStr(p2 + 1, mHay(i), mQTo(t)) = 0 Then Exit Function
+        Next
+    End If
+    RowMatches = True
+End Function
+
+'==============================================================================
+' Showing the results
+'==============================================================================
+
+' Fills the results list from mHit: newest first, at most mShowMax lines,
+' one line per chain if that box is ticked.
+Private Sub RenderList(ByVal keepSel As Boolean)
+    Dim arr() As Variant, d As Object, key As String, mark As String, today As Date
+    Dim n As Long, k As Long, i As Long, p As Long, units As Long, selRow As Long, sel As Long
+    Dim collapse As Boolean, found As Boolean, hadBody As Boolean
+
+    If Not mBuilt Then Exit Sub
+    On Error GoTo Fail
+    selRow = -1
+    If keepSel Then selRow = SelectedRow()
+    hadBody = mPreviewBody
+    collapse = (chkChain.Value = True) And Not mChainMode
+
+    ReDim mDisp(0 To mShowMax + 1)
+    ReDim mDispCnt(0 To mShowMax + 1)
+    If collapse Then
+        Set d = CreateObject("Scripting.Dictionary")
+        For k = 0 To mHitN - 1
+            i = mHit(k)
+            key = mConv(i)
+            If key = "" Then                            ' not part of a chain: a line of its own
+                units = units + 1
+                If n < mShowMax Then
+                    mDisp(n) = i
+                    mDispCnt(n) = 1
+                    n = n + 1
+                End If
+            ElseIf d.Exists(key) Then
+                p = d(key)
+                If p >= 0 Then mDispCnt(p) = mDispCnt(p) + 1
+            Else
+                units = units + 1
+                If n < mShowMax Then
+                    d.Add key, n
+                    mDisp(n) = i
+                    mDispCnt(n) = 1
+                    n = n + 1
+                Else
+                    d.Add key, -1
+                End If
+            End If
+        Next
+    Else
+        n = mHitN
+        If n > mShowMax Then n = mShowMax
+        For k = 0 To n - 1
+            mDisp(k) = mHit(k)
+            mDispCnt(k) = 1
+        Next
+        units = mHitN
+    End If
+    mDispN = n
+    mUnits = units
+
+    mIgnore = True
+    If n = 0 Then
+        lstResults.Clear
+    Else
+        mark = ChrW$(&H25CF)
+        today = Date
+        ReDim arr(0 To n - 1, 0 To 4)
+        For k = 0 To n - 1
+            i = mDisp(k)
+            If i = selRow Then
+                sel = k
+                found = True
+            End If
+            If (mFlags(i) And 1) <> 0 Then arr(k, 0) = mark Else arr(k, 0) = ""
+            arr(k, 1) = SmartDate(mDate(i), today)
+            arr(k, 2) = mWho(i)
+            If mSubj(i) = "" Then arr(k, 3) = "(no subject)" Else arr(k, 3) = mSubj(i)
+            If mDispCnt(k) > 1 Then arr(k, 3) = arr(k, 3) & "   (" & mDispCnt(k) & ")"
+            arr(k, 4) = mFShow(FolderOf(i))
+        Next
+        lstResults.List = arr
+        lstResults.ListIndex = sel
+    End If
+    mIgnore = False
+    btnMore.Visible = (units > n)
+    SetStatus
+
+    If mHint And IsBlankQuery() Then
+        ' nothing asked for yet: leave the how-to text showing
+    ElseIf found And hadBody Then
+        ShowPreview True
+    Else
+        ShowPreview False
+    End If
+    Exit Sub
+Fail:
+    mIgnore = False
+End Sub
+
+Private Function SmartDate(ByVal d As Date, ByVal today As Date) As String
+    If d = 0 Then
+        SmartDate = ""
+    ElseIf d >= today Then
+        SmartDate = Format$(d, "h:nn AM/PM")
+    ElseIf d >= today - 6 Then
+        SmartDate = Format$(d, "ddd h:nn AM/PM")
+    ElseIf Year(d) = Year(today) Then
+        SmartDate = Format$(d, "mmm d")
+    Else
+        SmartDate = Format$(d, "m/d/yyyy")
+    End If
+End Function
+
+Private Function Num(ByVal n As Long) As String
+    Num = Format$(n, "#,##0")
+End Function
+
+' The two status lines: what's listed, and the state of the list of mail.
+Private Sub SetStatus()
+    Dim a As String, b As String, live As Long
+    If Not mBuilt Then Exit Sub
+    On Error Resume Next
+    live = mN - mDead
+
+    If mChainMode Then
+        a = Num(mHitN) & IIf(mHitN = 1, " email", " emails") & " in this chain"
+    ElseIf mHitN = 0 Then
+        If live = 0 Then
+            a = ""
+        ElseIf mQPosN > 0 And mTextNote = "" Then
+            a = "Nothing matches by subject or people - press Enter to search the message text"
+        Else
+            a = "No emails match"
+        End If
+    Else
+        If mUnits <> mHitN Then
+            a = Num(mUnits) & " chains (" & Num(mHitN) & " emails)"
+        Else
+            a = Num(mHitN) & IIf(mHitN = 1, " email", " emails")
+        End If
+        If mUnits > mDispN Then a = a & " - newest " & Num(mDispN) & " listed"
+    End If
+    If mTextNote <> "" Then a = a & " - " & mTextNote
+
+    If mNote <> "" Then
+        b = mNote
+    ElseIf mLoading And mLoadingWhat <> "" Then
+        b = "Reading your mail: " & Num(live) & " emails so far (" & mLoadingWhat & ")"
+    ElseIf live > 0 Then
+        b = Num(live) & " emails in the list, read at " & Format$(mLoadedAt, "h:nn AM/PM") & ". F5 reads them again."
+    End If
+    If mCapped Then b = b & " Mailbox too large: part of it isn't in the list."
+    If mSkipAddr And Not mLoading Then b = b & " Sender addresses left out (slow to read here)."
+    lblStatus.Caption = a & vbCrLf & b
+End Sub
+
+'==============================================================================
+' Preview
+'==============================================================================
+
+' The list row of the selected line, or -1.
+Private Function SelectedRow() As Long
+    Dim r As Long
+    SelectedRow = -1
+    r = lstResults.ListIndex
+    If r >= 0 And r < mDispN Then SelectedRow = mDisp(r)
+End Function
+
+' Shows the selected email under the list. withBody also opens the email and
+' shows its text, starting near the first place a search word appears.
+Private Sub ShowPreview(ByVal withBody As Boolean)
+    Dim i As Long, fi As Long, it As Object, head As String, body As String, low As String
+    Dim p As Long, q As Long, t As Long
+
+    mHint = False
+    mPreviewBody = False
+    i = SelectedRow()
+    If i < 0 Then
+        lblPreview.Caption = ""
+        Exit Sub
+    End If
+    fi = FolderOf(i)
+    If mSubj(i) = "" Then head = "(no subject)" Else head = mSubj(i)
+    head = head & vbCrLf & mWho(i) & "   -   " & Format$(mDate(i), "ddd m/d/yyyy h:nn AM/PM") & _
+           "   -   " & mFPath(fi)
+    If Not withBody Then
+        lblPreview.Caption = head
+        Exit Sub
+    End If
+
+    Set it = GetItem(i)
+    If it Is Nothing Then
+        lblPreview.Caption = head & vbCrLf & vbCrLf & "(This email has been moved or deleted since " & _
+                             "the list was read. Press F5 to read the list again.)"
+        mFDirty(fi) = True
+        mWalkWanted = True
+        mAnyDirty = True
+        Exit Sub
+    End If
+    On Error Resume Next
+    body = it.Body
+    On Error GoTo 0
+
+    If mQPosN > 0 And Len(body) > 0 Then
+        low = LCase$(Left$(body, 100000))
+        For t = 0 To mQPosN - 1
+            q = InStr(low, mQPos(t))
+            If q > 0 And (p = 0 Or q < p) Then p = q
+        Next
+    End If
+    If p > 200 Then
+        body = "..." & Mid$(body, p - 150, 1500)
+    Else
+        body = Left$(body, 1500)
+    End If
+    lblPreview.Caption = head & vbCrLf & vbCrLf & Tidy(body)
+    mPreviewBody = True
+End Sub
+
+' Squeezes blank lines and runs of spaces out of a piece of text.
+Private Function Tidy(ByVal s As String) As String
+    s = Replace(s, vbTab, " ")
+    s = Replace(s, ChrW$(160), " ")
+    s = Replace(s, vbCrLf, vbLf)
+    s = Replace(s, vbCr, vbLf)
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+    s = Replace(s, vbLf & " ", vbLf)
+    s = Replace(s, " " & vbLf, vbLf)
+    Do While InStr(s, vbLf & vbLf) > 0
+        s = Replace(s, vbLf & vbLf, vbLf)
+    Loop
+    Do While Left$(s, 1) = vbLf
+        s = Mid$(s, 2)
+    Loop
+    Tidy = Replace(s, vbLf, vbCrLf)
+End Function
+
+' Opens the email of a row. Nothing if it's no longer where the list says.
+Private Function GetItem(ByVal i As Long) As Object
+    On Error Resume Next
+    Set GetItem = Application.Session.GetItemFromID(HexOf(mEid(i)), mFStore(FolderOf(i)))
+End Function
+
+'==============================================================================
+' Doing something with a result
+'==============================================================================
+
+Private Sub OpenSelected()
+    Dim i As Long, it As Object
+    i = SelectedRow()
+    If i < 0 Then Exit Sub
+    Set it = GetItem(i)
+    If it Is Nothing Then
+        ItemMissing i
+        Exit Sub
+    End If
+    AddHistory
+    On Error Resume Next
+    it.Display
+End Sub
+
+' Shows the selected email in its folder, in Outlook's main window.
+Private Sub GoToSelected()
+    Dim i As Long, it As Object, ex As Outlook.Explorer, t As Single, ok As Boolean
+    i = SelectedRow()
+    If i < 0 Then Exit Sub
+    Set it = GetItem(i)
+    If it Is Nothing Then
+        ItemMissing i
+        Exit Sub
+    End If
+    AddHistory
+
+    On Error Resume Next
+    Set ex = Application.ActiveExplorer
+    If ex Is Nothing Then Set ex = Application.Explorers.Item(1)
+    If ex Is Nothing Then Exit Sub
+    Set ex.CurrentFolder = it.Parent
+    ' The folder takes a moment to appear; select the email as soon as it can be.
+    t = Timer
+    Do
+        DoEvents
+        Sleep 40
+        ok = False
+        ok = ex.IsItemSelectableInView(it)
+        If ok Then
+            ex.ClearSelection
+            ex.AddToSelection it
+            Exit Do
+        End If
+    Loop While Timer >= t And Timer - t < 2.5
+    CloseWindow
+    ex.Activate
+End Sub
+
+' The email isn't where the list says: it was moved or deleted after the list
+' was read. Bring the list up to date.
+Private Sub ItemMissing(ByVal i As Long)
+    Dim fi As Long
+    On Error Resume Next
+    fi = FolderOf(i)
+    If fi >= 0 And fi < mFN Then mFDirty(fi) = True
+    mWalkWanted = True
+    lblPreview.Caption = "That email has been moved or deleted since the list was read. Updating the list..."
+    mHint = False
+    mPreviewBody = False
+    EnsureFresh False
+End Sub
+
+' Whole chain: lists every email in the selected email's chain, whatever is
+' in the boxes. Click again (Back) to return to the search.
+Private Sub ToggleChain()
+    Dim i As Long
+    If mChainMode Then
+        LeaveChain
+        RunQuery False
+        Exit Sub
+    End If
+    i = SelectedRow()
+    If i < 0 Then Exit Sub
+    If mConv(i) = "" Then
+        Beep
+        Exit Sub
+    End If
+    mChainKey = mConv(i)
+    mChainMode = True
+    btnChain.Caption = "Back"
+    btnChain.Accelerator = "B"
+    RunQuery False
+End Sub
+
+Private Sub LeaveChain()
+    If Not mChainMode Then Exit Sub
+    mChainMode = False
+    mChainKey = ""
+    btnChain.Caption = "Whole chain"
+    btnChain.Accelerator = "W"
+End Sub
+
+'==============================================================================
+' Searching the message text
+'   The list only holds subjects and people. For the text inside the emails
+'   this asks Windows' index - the one Outlook's own search uses - and adds
+'   what it finds to the results. It runs in the background: the answer
+'   arrives in mApp_AdvancedSearchComplete.
+'==============================================================================
+
+Private Sub StartTextSearch()
+    Dim crit As String, scope As String, rootScope As String, indexed As Boolean
+    Dim st As Outlook.Store, attempt As Long, found As Outlook.Search
+
+    If mChainMode Then
+        Beep
+        Exit Sub
+    End If
+    RunQuery False                              ' fresh results, and the words in mQPos
+    If mQPosN = 0 Then
+        Beep
+        Exit Sub
+    End If
+    AddHistory
+
+    On Error GoTo Fail
+    Set st = Application.Session.DefaultStore
+    On Error Resume Next
+    indexed = st.IsInstantSearchEnabled
+    On Error GoTo Fail
+    If mRootPath = "" Then mRootPath = st.GetRootFolder.FolderPath
+    rootScope = "'" & Replace(mRootPath, "'", "''") & "'"
+
+    mTextSeq = mTextSeq + 1
+    mTextTag = "NVS_mail_text_" & mTextSeq
+    mTextBusy = True                            ' before the search starts: its answer may come at once
+    ' The whole mailbox with words matched in the text, subject or people; if
+    ' Outlook won't take that, the top-level folders by name, then a simpler
+    ' condition (text and subject only).
+    For attempt = 1 To 4
+        crit = TextFilter(indexed, attempt <= 2)
+        If attempt Mod 2 = 1 Then scope = rootScope Else scope = TopFolderScope()
+        If crit <> "" And scope <> "" Then
+            Set found = Nothing
+            On Error Resume Next
+            Set found = mApp.AdvancedSearch(scope, crit, True, mTextTag)
+            On Error GoTo Fail
+            If Not found Is Nothing Then Exit For
+        End If
+    Next
+
+    If found Is Nothing Then
+        mTextBusy = False
+        mTextNote = "Outlook couldn't search the message text here (try In Outlook)"
+    Else
+        If mTextBusy Then Set mSearch = found
+        If Not mTextBusy Then
+            ' already answered: MergeText has set the note
+        ElseIf indexed Then
+            mTextNote = "searching the message text..."
+        Else
+            mTextNote = "searching the message text (this mailbox isn't indexed, so it's slow)..."
+        End If
+    End If
+    SetStatus
+    Exit Sub
+Fail:
+    mTextBusy = False
+    mTextNote = "the message text couldn't be searched: " & Err.Description
+    SetStatus
+End Sub
+
+' The condition handed to Outlook: every word in the text or subject - and,
+' when wide, the names of the people too.
+Private Function TextFilter(ByVal indexed As Boolean, ByVal wide As Boolean) As String
+    Dim t As Long, s As String, one As String
+    For t = 0 To mQPosN - 1
+        one = AnyField(mQPos(t), indexed, wide)
+        If one <> "" Then
+            If s <> "" Then s = s & " AND "
+            s = s & "(" & one & ")"
+        End If
+    Next
+    If s = "" Then Exit Function
+    For t = 0 To mQNegN - 1
+        one = AnyField(mQNeg(t), indexed, wide)
+        If one <> "" Then s = s & " AND NOT (" & one & ")"
+    Next
+    TextFilter = s
+End Function
+
+Private Function AnyField(ByVal word As String, ByVal indexed As Boolean, ByVal wide As Boolean) As String
+    Dim op As String, fields As Variant, i As Long, s As String
+    word = Trim$(Replace(Replace(Replace(word, "'", " "), """", " "), "%", " "))
+    If word = "" Then Exit Function
+    If Not indexed Then
+        op = " LIKE '%" & word & "%'"
+    ElseIf word Like "*[!0-9a-z]*" Then
+        op = " ci_phrasematch '" & word & "'"           ' several words, or punctuation: exactly this
+    Else
+        op = " ci_startswith '" & word & "'"            ' one word: words that start with it
+    End If
+    If wide Then
+        fields = Array(F_BODY, F_SUBJECT, F_FROM, F_TO, F_CC)
+    Else
+        fields = Array(F_BODY, F_SUBJECT)
+    End If
+    For i = 0 To UBound(fields)
+        If i > 0 Then s = s & " OR "
+        s = s & """" & fields(i) & """" & op
+    Next
+    AnyField = s
+End Function
+
+' The mailbox's top-level mail folders, as AdvancedSearch wants them.
+Private Function TopFolderScope() As String
+    Dim fi As Long, s As String
+    For fi = 0 To mFN - 1
+        If Not mFGone(fi) And mFStore(fi) = mDefStore And InStr(mFPath(fi), "\") = 0 Then
+            If s <> "" Then s = s & ","
+            s = s & "'" & Replace(mRootPath & "\" & mFPath(fi), "'", "''") & "'"
+        End If
+    Next
+    TopFolderScope = s
+End Function
+
+Private Sub mApp_AdvancedSearchComplete(ByVal SearchObject As Outlook.Search)
+    On Error GoTo Fail
+    If Not mTextBusy Then Exit Sub
+    If SearchObject Is Nothing Then Exit Sub
+    If SearchObject.Tag <> mTextTag Then Exit Sub
+    mTextBusy = False
+    MergeText SearchObject
+    Set mSearch = Nothing
+    Exit Sub
+Fail:
+    mTextBusy = False
+    mIgnore = False
+    mTextNote = "the message text results couldn't be read: " & Err.Description
+    SetStatus
+End Sub
+
+' Adds the text matches to the results: read as temporary rows, put through
+' the From / To / When / Folder filters, and left out if already listed.
+Private Sub MergeText(ByVal so As Outlook.Search)
+    Dim tbl As Outlook.Table, seen As Object, key As String
+    Dim first As Long, got As Long, i As Long, k As Long, added As Long
+
+    Set tbl = so.GetTable
+    first = mN
+    got = ReadRows(tbl, -1, True, TEXT_MAX_RESULTS, False)
+    If got > 0 Then
+        mTmpFirst = first
+        mTmpLast = mN - 1
+    End If
+
+    Set seen = CreateObject("Scripting.Dictionary")
+    For k = 0 To mHitN - 1
+        key = RowKey(mHit(k))
+        If Not seen.Exists(key) Then seen.Add key, True
+    Next
+    ReDim Preserve mHit(0 To mHitN + got + 1)
+    For i = first To mN - 1
+        If mFolder(i) <= -2 Then
+            If RowMatches(i, -2 - mFolder(i), False) Then
+                key = RowKey(i)
+                If Not seen.Exists(key) Then
+                    seen.Add key, True
+                    mHit(mHitN) = i
+                    mHitN = mHitN + 1
+                    added = added + 1
+                End If
+            End If
+        End If
+    Next
+    If added > 0 And mHitN > 1 Then SortDesc mHit, 0, mHitN - 1
+
+    If added = 0 Then
+        mTextNote = "nothing more found in the message text"
+    Else
+        mTextNote = "including " & Num(added) & " found in the message text"
+    End If
+    If got >= TEXT_MAX_RESULTS Then mTextNote = mTextNote & " (newest " & Num(TEXT_MAX_RESULTS) & " checked)"
+    RenderList True
+End Sub
+
+' Same folder, same time, same subject = the same email.
+Private Function RowKey(ByVal i As Long) As String
+    RowKey = CStr(CDbl(mDate(i))) & vbTab & FolderOf(i) & vbTab & mSubj(i)
+End Function
+
+Private Sub StopTextSearch()
+    On Error Resume Next
+    If mTextBusy Then
+        mTextBusy = False
+        mTextTag = ""
+        CallByName mSearch, "Stop", VbMethod
+    End If
+    Set mSearch = Nothing
+End Sub
+
+'==============================================================================
+' Outlook's own search, as a fallback
+'   For mail that isn't on this PC (older than Outlook keeps offline) and for
+'   words inside attachments: runs the same search in Outlook, on all folders.
+'==============================================================================
+
+Private Sub RunInOutlook()
+    Dim q As String, t As Long, ex As Outlook.Explorer
+
+    ReadCriteria
+    For t = 0 To mQPosN - 1
+        If InStr(mQPos(t), " ") > 0 Then q = q & " """ & mQPos(t) & """" Else q = q & " " & mQPos(t)
+    Next
+    For t = 0 To mQNegN - 1
+        If InStr(mQNeg(t), " ") > 0 Then q = q & " NOT """ & mQNeg(t) & """" Else q = q & " NOT " & mQNeg(t)
+    Next
+    If Trim$(txtFrom.Text) <> "" Then q = q & " from:(" & Trim$(txtFrom.Text) & ")"
+    If Trim$(txtTo.Text) <> "" Then q = q & " to:(" & Trim$(txtTo.Text) & ")"
+    If mQAtt Then q = q & " hasattachments:yes"
+    If mQUnread Then q = q & " read:no"
+    If mQD0 <> 0 Then q = q & " received:>=" & Format$(mQD0, "Short Date")
+    If mQD1 <> 0 Then q = q & " received:<" & Format$(mQD1, "Short Date")
+    q = Trim$(q)
+    If q = "" Then
+        Beep
+        Exit Sub
+    End If
+    AddHistory
+
+    On Error Resume Next
+    Set ex = Application.ActiveExplorer
+    If ex Is Nothing Then Set ex = Application.Explorers.Item(1)
+    If ex Is Nothing Then Exit Sub
+    CloseWindow
+    ex.Activate
+    ex.Search q, olSearchScopeAllFolders
+End Sub
+
+'==============================================================================
+' Recent searches (the Search box's drop-down list)
+'==============================================================================
+
+Private Sub LoadHistory()
+    Dim parts() As String, i As Long, s As String
+    s = GetSetting("NVS_mail", "Search", "History", "")
+    If s = "" Then Exit Sub
+    parts = Split(s, vbLf)
+    For i = 0 To UBound(parts)
+        If parts(i) <> "" Then cboQuery.AddItem parts(i)
+    Next
+End Sub
+
+' Puts the current search at the top of the list (the last 15 are kept).
+Private Sub AddHistory()
+    Dim q As String, i As Long, s As String, selAt As Long
+
+    On Error GoTo Done
+    q = Trim$(cboQuery.Text)
+    If q = "" Then Exit Sub
+    mIgnore = True
+    selAt = cboQuery.SelStart
+    For i = cboQuery.ListCount - 1 To 0 Step -1
+        If StrComp(cboQuery.List(i), q, vbTextCompare) = 0 Then cboQuery.RemoveItem i
+    Next
+    cboQuery.AddItem q, 0
+    Do While cboQuery.ListCount > 15
+        cboQuery.RemoveItem cboQuery.ListCount - 1
+    Loop
+    For i = 0 To cboQuery.ListCount - 1
+        s = s & cboQuery.List(i) & vbLf
+    Next
+    SaveSetting "NVS_mail", "Search", "History", s
+    If cboQuery.Text <> q Then
+        cboQuery.Text = q
+        cboQuery.SelStart = selAt
+    End If
+Done:
+    mIgnore = False
+End Sub

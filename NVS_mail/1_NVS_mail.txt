@@ -14,6 +14,7 @@
 '   NVS_SetFolderColor            choose a color for a folder (and its subfolders)
 '   NVS_ListFolderColors          see, add, change or remove folder colors
 '   NVS_SaveLocations             where Save Email + Attachments opens, per folder
+'   NVS_Search                    search every folder at once (needs optional file 5)
 ' Extras (ribbon, or run with Alt+F8):
 '   NVS_RemoveFolderColor  NVS_RecolorSelected  NVS_RecolorInbox
 '   NVS_ApplyRowColorsToView
@@ -158,6 +159,9 @@ Private mDlgSeen As Long
 ' Undo Move: what each NVS_mail move did (newest last), and the one in progress
 Private mUndo As Collection
 Private mUndoStep As Collection
+
+' The Search window (optional file 5), once it has been opened
+Private mSearchForm As Object
 
 ' Folder list used by the Move Items window (NVS_mail_Dialog).
 Public gNVS_FolderCount As Long
@@ -332,7 +336,13 @@ Public Sub NVS_UndoMove()
         On Error Resume Next
         Set it = Application.Session.GetItemFromID(rec(0), rec(1))
         Set f = Application.Session.GetFolderFromID(rec(2), rec(3))
-        If Not it Is Nothing And Not f Is Nothing Then Set m = it.Move(f)
+        If Not it Is Nothing And Not f Is Nothing Then
+            If Not mSearchForm Is Nothing Then
+                SearchNote it.Parent.EntryID
+                SearchNote CStr(rec(2))
+            End If
+            Set m = it.Move(f)
+        End If
         On Error GoTo 0
         If m Is Nothing Then missed = missed + 1 Else moved.Add m
     Next
@@ -366,6 +376,10 @@ Private Function MoveItem(ByVal it As Object, ByVal target As Outlook.Folder) As
     fromStore = it.Parent.StoreID
     Set m = it.Move(target)
     If m Is Nothing Then Exit Function
+    If Not mSearchForm Is Nothing Then
+        SearchNote fromID
+        SearchNote target.EntryID
+    End If
     If Not mUndoStep Is Nothing And fromID <> "" Then
         mUndoStep.Add Array(m.EntryID, target.StoreID, fromID, fromStore)
     End If
@@ -1139,6 +1153,35 @@ Private Function CurrentDraft() As Outlook.MailItem
 End Function
 
 '==============================================================================
+' Search
+'==============================================================================
+
+' Opens the Search window (optional file 5): every folder at once, results as
+' you type, newest first. See README.md.
+Public Sub NVS_Search()
+    If mSearchForm Is Nothing Then
+        On Error Resume Next
+        Set mSearchForm = VBA.UserForms.Add("NVS_mail_Search")
+        On Error GoTo 0
+        If mSearchForm Is Nothing Then
+            MsgBox "The Search window isn't set up yet." & vbCrLf & vbCrLf & _
+                   "Add file 5: a UserForm named NVS_mail_Search, with the code from " & _
+                   "5_NVS_mail_Search.txt. See README.md.", vbInformation, NVS_APP
+            Exit Sub
+        End If
+    End If
+    mSearchForm.ShowSearch
+End Sub
+
+' Tells the Search window, once it has been opened, that the mail in a folder
+' changed, so its list reads that folder again. "inbox" stands for the Inbox.
+Private Sub SearchNote(ByVal folderID As String)
+    If mSearchForm Is Nothing Then Exit Sub
+    On Error Resume Next
+    mSearchForm.FolderChanged folderID
+End Sub
+
+'==============================================================================
 ' Schedule a meeting with everyone on the chain
 '==============================================================================
 
@@ -1242,6 +1285,7 @@ End Sub
 Public Sub NVS_OnNewMail(ByVal entryIDs As String)
     Dim ids() As String, i As Long, it As Object, seen As Object, cid As String
     On Error Resume Next
+    SearchNote "inbox"
     If Not NVS_AUTO_COLOR Then Exit Sub
     FreshFolderInfo
     If MappedCount() = 0 Then Exit Sub
@@ -1271,6 +1315,7 @@ End Sub
 Public Sub NVS_OnItemFiled(ByVal item As Object)
     Dim cid As String, ci As String
     On Error Resume Next
+    If Not mSearchForm Is Nothing Then SearchNote item.Parent.EntryID
     If Not NVS_AUTO_COLOR Then Exit Sub
     If gNVS_Busy Then Exit Sub
     If Not TypeOf item Is Outlook.MailItem Then Exit Sub
