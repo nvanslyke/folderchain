@@ -220,6 +220,7 @@ Public Sub ShowSearch()
         Me.Show vbModeless
         mHwnd = NVS_PlaceForm(Me, owner, True, True)    ' fits the screen, comes to the front
         NVS_WheelOn Me, mHwnd
+        Arrange                             ' again once placed: that screen may be scaled differently
     End If
     FillWhere
     cboQuery.SetFocus

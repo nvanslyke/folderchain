@@ -15,8 +15,8 @@
 '   NVS_ListFolderColors          see, add, change or remove folder colors
 '   NVS_SaveLocations             where Save Email + Attachments opens, per folder
 '   NVS_Search                    search every folder at once (needs optional file 4)
-'   NVS_FindTime                  everyone on the chain's calendars, best times
-'                                 first, invite for the time you pick (file 5)
+'   NVS_FindTime                  when everyone on the chain is free, and the
+'                                 invite for the time you pick (needs file 5)
 ' Extras (ribbon, or run with Alt+F8):
 '   NVS_RemoveFolderColor  NVS_RecolorSelected  NVS_RecolorInbox
 '   NVS_ApplyRowColorsToView
@@ -1841,9 +1841,9 @@ End Sub
 ' Find a Time (optional file 5)
 '==============================================================================
 
-' Opens Find a Time with everyone on the selected chain: their calendars side
-' by side, the times most of them can make listed first, and the meeting
-' invite for the time you pick. Works with nothing selected too (just you).
+' Opens Find a Time for the selected chain: when everyone on it inside your
+' firm is free, and the meeting invite for the time you pick. Works with
+' nothing selected too (just you).
 Public Sub NVS_FindTime()
     Dim items As Collection, people As Collection, topic As String, owner As LongPtr
     owner = GetForegroundWindow()

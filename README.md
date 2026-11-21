@@ -11,7 +11,7 @@ Macros for classic Outlook for Windows that treat an email chain as one unit:
 * Start a new meeting invite with everyone on the chain, without it landing in the chain
 * Search every folder at once as you type, with results that don't depend on Windows' search index
 * Keyboard shortcuts for the NVS_mail ribbon tab: Alt, X, then one letter per button
-* Find a time that works for everyone on a chain, from the keyboard: their calendars side by side, the best times first, and the invite for the one you pick
+* Find a time when everyone on a chain is free, from the keyboard: the free times day by day, the times someone sent you checked against your team's calendars, and the invite for the one you pick
 
 Setup and usage: **[NVS_mail/README.md](NVS_mail/README.md)**
 

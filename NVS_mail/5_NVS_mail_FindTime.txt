@@ -1,10 +1,11 @@
 '==============================================================================
 ' NVS_mail - optional file 5:  NVS_mail_FindTime   (UserForm)
 '
-' Find a Time: everyone on an email chain, their calendars side by side, the
-' times most of them can make listed first, and Outlook's meeting invite for
-' the time you pick - all from the keyboard. Nothing is ever sent: the invite
-' opens for you to check, add a Teams link and send.
+' Find a Time: when everyone on an email chain is free, from the keyboard.
+' Only the people inside your firm are shown - theirs are the calendars
+' Outlook can see. Pick a time and press Enter: Outlook's meeting invite
+' opens with everyone on it. Nothing is ever sent: you check the invite, add
+' a Teams link and send it yourself.
 '
 ' HOW TO ADD (once): in the VBA editor (Alt+F11) choose Insert > UserForm.
 ' Press F4 and change (Name) to  NVS_mail_FindTime  . Right-click the form >
@@ -13,14 +14,15 @@
 ' macro NVS_FindTime (it's in file 1) to the ribbon or Quick Access Toolbar.
 '
 ' Keys (also shown at the bottom of the window):
-'   type a name        add someone (Enter = required, Shift+Enter = optional)
-'   Alt+B / Enter      the best times; Enter on one opens the invite
-'   Alt+O              "Only at": type times someone gave you ("tue 2-4, wed 10-11 ET")
-'   Alt+G              the grid: arrows move, Space marks a time to look at, Enter = invite
-'   Alt+P              people: Space switches required / optional / not invited, Delete removes
-'   Alt+L / Alt+H      meeting length / hours to look in
-'   Ctrl+K             pick people from the address book       F5  check calendars again
-'   Ctrl+Enter         invite for the selected time            Esc close
+'   Up / Down          pick a time; Page Up / Page Down: the day before / after
+'   Left / Right       start the meeting 15 minutes earlier / later
+'   Enter              open the invite for that time
+'   Ctrl+C             copy the free times, to paste into a reply
+'   type a name        add someone (Enter adds them)
+'   Alt+T              their times: paste the times someone sent you
+'   Alt+P              people: Space = needed / optional, Delete = remove
+'   Alt+L              meeting length          Alt+O  also invite people outside the firm
+'   Ctrl+K             address book            F5  check the calendars again       Esc  close
 '==============================================================================
 Option Explicit
 
@@ -28,14 +30,10 @@ Option Explicit
 ' SETTINGS - change these to taste
 '------------------------------------------------------------------------------
 
-' Working days shown, starting today.
+' Weekdays shown, starting today.
 Private Const FT_DAYS As Long = 10
 
-' Hours the grid covers (24-hour clock): 7 = 7:00 AM, 20 = 8:00 PM.
-Private Const FT_GRID_FROM As Long = 7
-Private Const FT_GRID_TO As Long = 20
-
-' Hours the best times are looked for in, to start with (the Hours box).
+' The hours free times are looked for in.
 Private Const FT_HOURS As String = "8am-6pm"
 
 ' Meeting length to start with, in minutes.
@@ -47,111 +45,180 @@ Private Const FT_TENTATIVE_BUSY As Boolean = True
 ' True = Saturdays and Sundays are shown too.
 Private Const FT_WEEKENDS As Boolean = False
 
+' Who's inside your firm: anyone with your email domain, anyone in your
+' firm's address book, and anyone with one of these domains (separated by
+' commas), e.g. "bank.com, banksecurities.com". People outside the firm on
+' the chain aren't shown; tick "Also invite" (Alt+O) to put them on the invite.
+Private Const FT_INSIDE_DOMAINS As String = ""
+
+' True = "Also invite the people outside the firm" starts ticked.
+Private Const FT_INVITE_OUTSIDE As Boolean = False
+
+' Days of free times copied by Ctrl+C.
+Private Const FT_COPY_DAYS As Long = 5
+
 '------------------------------------------------------------------------------
 ' Internals
 '------------------------------------------------------------------------------
 Private Const UI_FONT As String = "Segoe UI"
-Private Const BEST_ROWS As Long = 40          ' times listed under Best times
-Private Const MAX_COLS As Long = 15           ' most days on screen at once
-Private Const NAME_ROWS As Long = 8           ' suggestions shown under Add person
-Private Const ONLY_HINT As String = "Times someone can do, as written in their email:   tue 2-4,   wed 10-11:30 ET,   thu after 3"
+Private Const ROW_H As Single = 15            ' height of a row in the lists
+Private Const NAME_ROWS As Long = 8           ' suggestions shown under Add someone
+Private Const EARLY_MIN As Long = 420         ' 7 AM: as early as "before 9" reaches back
+Private Const LATE_MIN As Long = 1200         ' 8 PM: as late as "after 7" or "evening" reaches
+Private Const THEIR_HINT As String = "Type or paste them as written:   tue 2-4,   wed 10-11:30 ET,   thu after 3"
 
-' Colors of the grid: everyone free ... three or more can't make it.
-Private Const C_FREE As Long = 8441480        ' RGB(136, 206, 128)
-Private Const C_FREE_OPT As Long = 11723976   ' RGB(200, 228, 178): only optional people busy
-Private Const C_ONE As Long = 7922431         ' RGB(255, 226, 120)
-Private Const C_TWO As Long = 6600954         ' RGB(250, 184, 100)
-Private Const C_MANY As Long = 7895276        ' RGB(236, 120, 120)
-Private Const C_OFF As Long = 15921906        ' RGB(242, 242, 242): past, or doesn't fit
-Private Const C_MARK As Long = 13135872       ' RGB(0, 112, 200): times you marked
+' Kinds of row in the times list
+Private Const K_FREE As Long = 0              ' everyone needed is free
+Private Const K_ALLBUT As Long = 1            ' everyone but one person
+Private Const K_NONE As Long = 2              ' a day with no time everyone's free
+Private Const K_WORKS As Long = 3             ' one of their times, and everyone's free
+Private Const K_BUSY As Long = 4              ' one of their times, someone's busy
+Private Const K_SHORT As Long = 5             ' one of their times, everyone free but not for long enough
+Private Const K_PAST As Long = 6              ' one of their times, already gone
+Private Const K_FAR As Long = 7               ' one of their times, too far ahead to see calendars
+Private Const K_NOTE As Long = 8              ' a message
+
+' Colors
+Private Const C_SEL As Long = 16771276        ' RGB(204, 232, 255): the selected row
+Private Const C_SEL_OFF As Long = 14277081    ' RGB(217, 217, 217): selected, list not in use
+Private Const C_HOVER As Long = 16774117      ' RGB(229, 243, 255): under the pointer
+Private Const C_BAND As Long = 16250871       ' RGB(247, 247, 247): every other day
+Private Const C_WHITE As Long = 16777215
+Private Const C_TEXT As Long = 2105376        ' RGB(32, 32, 32)
+Private Const C_GRAY As Long = 7763574        ' RGB(118, 118, 118)
+Private Const C_GREEN As Long = 1080336       ' RGB(16, 124, 16)
+Private Const C_RED As Long = 1846212         ' RGB(196, 43, 28)
+Private Const C_AMBER As Long = 23200         ' RGB(160, 90, 0)
+Private Const C_PURPLE As Long = 12084359     ' RGB(135, 100, 184)
 
 ' Controls
 Private WithEvents txtAdd As MSForms.TextBox
-Private WithEvents lstSuggest As MSForms.ListBox
-Private WithEvents lstPeople As MSForms.ListBox
+Private WithEvents txtPeopleKeys As MSForms.TextBox  ' takes the keyboard for the people list
+Private WithEvents lblPeopleHit As MSForms.Label     ' invisible click area over the people
+Private WithEvents sbPeople As MSForms.ScrollBar
+Private WithEvents chkOut As MSForms.CheckBox
+Private WithEvents txtTheir As MSForms.TextBox
 Private WithEvents cboLen As MSForms.ComboBox
-Private WithEvents txtHours As MSForms.TextBox
-Private WithEvents chkTent As MSForms.CheckBox
-Private WithEvents txtOnly As MSForms.TextBox
-Private WithEvents txtSubject As MSForms.TextBox
-Private WithEvents txtGrid As MSForms.TextBox        ' takes the keyboard for the grid
-Private WithEvents lblGridHit As MSForms.Label       ' invisible click area over the grid
-Private WithEvents lstBest As MSForms.ListBox
+Private WithEvents txtTimesKeys As MSForms.TextBox   ' takes the keyboard for the times list
+Private WithEvents lblTimesHit As MSForms.Label
+Private WithEvents sbTimes As MSForms.ScrollBar
+Private WithEvents lblSugHit As MSForms.Label
+Private WithEvents btnCopy As MSForms.CommandButton
 Private WithEvents btnInvite As MSForms.CommandButton
-Private WithEvents btnClose As MSForms.CommandButton
-Private WithEvents btnPrev As MSForms.CommandButton
-Private WithEvents btnNext As MSForms.CommandButton
+Private fraPeople As MSForms.Frame
+Private fraTimes As MSForms.Frame
+Private fraSug As MSForms.Frame
 Private lblAdd As MSForms.Label
+Private lblAddHint As MSForms.Label
 Private lblPeople As MSForms.Label
+Private lblOutNames As MSForms.Label
+Private lblTheir As MSForms.Label
+Private lblTheirInfo As MSForms.Label
+Private lblTimes As MSForms.Label
+Private lblTimesInfo As MSForms.Label
 Private lblLen As MSForms.Label
-Private lblHours As MSForms.Label
-Private lblSubject As MSForms.Label
-Private lblOnly As MSForms.Label
-Private lblOnlyInfo As MSForms.Label
-Private lblGridCap As MSForms.Label
-Private lblBest As MSForms.Label
 Private lblStatus As MSForms.Label
 Private lblKeys As MSForms.Label
-Private lblCursor As MSForms.Label
-Private mCell() As MSForms.Label                     ' (column, slot) on screen
-Private mDayLbl() As MSForms.Label
-Private mTimeLbl() As MSForms.Label
-Private mColsMade As Long
 
-' People: name, address, role ("You", "R" required, "O" optional, "X" not
-' invited), free/busy (one character per 15 minutes from the first day), and
-' whether it's loaded (0 = not yet, 1 = yes, 2 = calendar can't be read).
+' The rows of the three lists, made to fit the window
+Private mPRowBack() As MSForms.Label
+Private mPRowName() As MSForms.Label
+Private mPRowTag() As MSForms.Label
+Private mPRowStat() As MSForms.Label
+Private mPSlots As Long                              ' people rows that fit
+Private mPSlotsMade As Long
+Private mTRowBack() As MSForms.Label
+Private mTRowDay() As MSForms.Label
+Private mTRowTime() As MSForms.Label
+Private mTRowNote() As MSForms.Label
+Private mTSlots As Long                              ' time rows that fit
+Private mTSlotsMade As Long
+Private mSRowBack(1 To NAME_ROWS) As MSForms.Label
+Private mSRowName(1 To NAME_ROWS) As MSForms.Label
+Private mSRowAddr(1 To NAME_ROWS) As MSForms.Label
+
+' People inside the firm: name, address, "R" needed or "O" optional, their
+' free/busy (a character for every 15 minutes from midnight of mPFBDay) and
+' whether it's read (0 = not yet, 1 = yes, 2 = can't be read, 3 = outside
+' the firm, not read). Person 1 is always you.
 Private mPN As Long
 Private mPName() As String
 Private mPAddr() As String
 Private mPRole() As String
 Private mPFB() As String
+Private mPFBDay() As Date
 Private mPState() As Long
+Private mPSel As Long                                ' selected person
+Private mPTop As Long                                ' first person on screen
+Private mPHover As Long
 Private mGen As Long                                 ' changes when the people are replaced
 
-' Days and times
+' People outside the firm from the chain: invited only if chkOut is ticked
+Private mON As Long
+Private mOName() As String
+Private mOAddr() As String
+Private mORole() As String
+
+' The times list. Times are counted in quarter hours from midnight today
+' (mBase): 0 = 12:00 AM, 1 = 12:15 AM ... 96 = midnight tonight.
+Private mRN As Long
+Private mRKind() As Long
+Private mRA() As Long                                ' start of the row's time
+Private mRB() As Long                                ' its end
+Private mRAt() As Long                               ' when the meeting would start
+Private mRWho() As String                            ' who's busy, or the one left out
+Private mRBand() As Boolean                          ' shaded: every other day
+Private mRSel As Long                                ' selected row
+Private mRTop As Long                                ' first row on screen
+Private mTHover As Long
+Private mBase As Date
+Private mNowQ As Long                                ' the first quarter hour from now
+Private mLenQ As Long                                ' the meeting's length in quarter hours
+Private mNote As String                              ' message shown when there are no rows
+
+' Days and hours
 Private mDayN As Long
 Private mDay() As Date                               ' midnight of each day shown
-Private mSlotN As Long                               ' half hours in the grid
-Private mFirstCol As Long                            ' first day on screen (paging)
-Private mShowCols As Long                            ' days on screen
-Private mCurD As Long                                ' the selected time: day ...
-Private mCurS As Long                                ' ... and half hour
 Private mLen As Long                                 ' meeting length, minutes
-Private mHourFrom As Long                            ' hours to look in, minutes from midnight
+Private mHourFrom As Long                            ' the hours looked in, minutes from midnight
 Private mHourTo As Long
-Private mWinN As Long                                ' times typed in Only at
+Private mWinN As Long                                ' their times, as typed
 Private mWinS() As Date
 Private mWinE() As Date
-Private mMarks As Object                             ' "day|slot" -> True: times marked in the grid
 
-' What each time looks like, worked out by Recompute
-Private mReq() As Long                               ' (day, slot): required people busy
-Private mOpt() As Long                               ' optional people busy
-Private mOK() As Boolean                             ' a time to suggest
-Private mFits() As Boolean                           ' not past, and fits in the day
-Private mBestD() As Long
-Private mBestS() As Long
-Private mBestN As Long
+' Add someone: the suggestions on screen
+Private mSugN As Long
+Private mSugSel As Long
+Private mSugName(1 To NAME_ROWS) As String
+Private mSugAddr(1 To NAME_ROWS) As String
 
-' Grid geometry (points)
-Private mGX As Single
-Private mGY As Single
-Private mCW As Single
-Private mCH As Single
-
-' Names for Add person, from recent mail: lower-case name -> Array(name, address, count)
-Private mNames As Object
-Private mFBCache As Object                           ' address -> Array(free/busy, state, when, first day)
-
+Private mNames As Object                             ' lower-case name -> Array(name, address, count), from recent mail
+Private mFBCache As Object                           ' address -> Array(free/busy, state, when, day)
+Private mInside As Object                            ' address -> True if inside the firm
 Private mBuilt As Boolean
 Private mLoading As Boolean
+Private mWaiting As Long                             ' calendars still being read
 Private mIgnore As Boolean
 Private mOwner As LongPtr
 Private mHwnd As LongPtr
-Private mPeopleOver As Boolean                       ' the mouse is over the people list (wheel)
+Private mTopic As String
+Private mLastShown As Single                         ' when the window was last closed (Timer) ...
+Private mLastDay As Date                             ' ... and on which day
+Private mFocus As Long                               ' the list with the keyboard: 1 people, 2 times, 0 neither
+Private mOver As Long                                ' the list under the pointer (for the wheel)
+Private mPainting As Boolean                         ' scroll bars being set by the code, not by you
+Private mClickOK As Boolean                          ' the last click in the times list was on a time
 
 Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
+Private Declare PtrSafe Function OpenClipboard Lib "user32" (ByVal hWnd As LongPtr) As Long
+Private Declare PtrSafe Function EmptyClipboard Lib "user32" () As Long
+Private Declare PtrSafe Function CloseClipboard Lib "user32" () As Long
+Private Declare PtrSafe Function SetClipboardData Lib "user32" (ByVal wFormat As Long, ByVal hMem As LongPtr) As LongPtr
+Private Declare PtrSafe Function GlobalAlloc Lib "kernel32" (ByVal wFlags As Long, ByVal dwBytes As LongPtr) As LongPtr
+Private Declare PtrSafe Function GlobalLock Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
+Private Declare PtrSafe Function GlobalUnlock Lib "kernel32" (ByVal hMem As LongPtr) As Long
+Private Declare PtrSafe Function GlobalFree Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
+Private Declare PtrSafe Sub CopyBytes Lib "kernel32" Alias "RtlMoveMemory" (ByVal dest As LongPtr, ByVal src As LongPtr, ByVal n As LongPtr)
 
 '==============================================================================
 ' Opening the window
@@ -160,35 +227,53 @@ Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
 ' Called by NVS_FindTime (file 1). people: a Collection of Array(name,
 ' address, "R" or "O") from the chain. topic: the invite's subject.
 Public Sub StartFor(ByVal people As Collection, ByVal topic As String, ByVal owner As LongPtr)
-    Dim v As Variant
+    Dim v As Variant, keep As Boolean
     On Error GoTo Fail
     mOwner = owner
     If Not mBuilt Then BuildUI
 
-    mGen = mGen + 1                         ' a calendar being read for the last chain is dropped
-    mPN = 0
-    ReDim mPName(1 To 8)
-    ReDim mPAddr(1 To 8)
-    ReDim mPRole(1 To 8)
-    ReDim mPFB(1 To 8)
-    ReDim mPState(1 To 8)
-    AddPersonRow Application.Session.CurrentUser.Name, NVS_MyAddress(), "You"
-    For Each v In people
-        AddPersonRow CStr(v(0)), CStr(v(1)), CStr(v(2))
-    Next
-
-    mIgnore = True
-    txtSubject.Text = topic
-    txtOnly.Text = ""
-    txtAdd.Text = ""
-    mIgnore = False
-    lstSuggest.Visible = False
-    Set mMarks = CreateObject("Scripting.Dictionary")
-    mWinN = 0
-    lblOnlyInfo.Caption = ONLY_HINT
+    ' The same chain again within half an hour: carry on where you left off.
+    keep = False
+    If mPN > 0 And topic = mTopic Then
+        If Me.Visible Then keep = True Else keep = (mLastDay = Date And Elapsed(mLastShown) < 1800)
+    End If
+    mTopic = topic
+    If Not keep Then
+        mGen = mGen + 1                     ' a calendar being read for the last chain is dropped
+        mPN = 0
+        ReDim mPName(1 To 8)
+        ReDim mPAddr(1 To 8)
+        ReDim mPRole(1 To 8)
+        ReDim mPFB(1 To 8)
+        ReDim mPFBDay(1 To 8)
+        ReDim mPState(1 To 8)
+        mON = 0
+        ReDim mOName(1 To 8)
+        ReDim mOAddr(1 To 8)
+        ReDim mORole(1 To 8)
+        AddMe
+        For Each v In people                ' needed people first, then optional
+            If CStr(v(2)) = "R" Then AddChainPerson CStr(v(0)), CStr(v(1)), "R"
+        Next
+        For Each v In people
+            If CStr(v(2)) <> "R" Then AddChainPerson CStr(v(0)), CStr(v(1)), "O"
+        Next
+        mIgnore = True
+        txtTheir.Text = ""
+        txtAdd.Text = ""
+        chkOut.Value = FT_INVITE_OUTSIDE
+        mIgnore = False
+        mWinN = 0
+        mPSel = 1
+        mPTop = 1
+        mRSel = 0
+        mRTop = 1
+    End If
+    HideSug
+    ShowOutside
     MakeDays
-    FirstFreeSlot
-    mFirstCol = 1
+    ApplyTheir
+    If topic = "" Then Me.Caption = "Find a Time" Else Me.Caption = "Find a Time - " & Left$(topic, 80)
 
     If Not Me.Visible Then
         Me.Show vbModeless
@@ -197,9 +282,9 @@ Public Sub StartFor(ByVal people As Collection, ByVal topic As String, ByVal own
     Else
         Me.Show vbModeless
     End If
-    Arrange
-    Recompute
-    If mPN > 1 Then lstBest.SetFocus Else txtAdd.SetFocus
+    Arrange                                 ' again once placed: that screen may be scaled differently
+    BuildRows
+    If mPN > 1 Or mWinN > 0 Then FocusList 2 Else txtAdd.SetFocus
     LoadCalendars
     Exit Sub
 Fail:
@@ -224,35 +309,20 @@ End Sub
 
 Private Sub HideWindow()
     On Error Resume Next
-    SaveSetting "NVS_mail", "Window", "FindTimeWidth", CStr(CLng(Me.Width))
-    SaveSetting "NVS_mail", "Window", "FindTimeHeight", CStr(CLng(Me.Height))
-    lstSuggest.Visible = False
+    SaveSetting "NVS_mail", "Window", "FindTime2Width", CStr(CLng(Me.Width))
+    SaveSetting "NVS_mail", "Window", "FindTime2Height", CStr(CLng(Me.Height))
+    HideSug
+    mLastShown = Timer
+    mLastDay = Date
     NVS_WheelOff Me
     Me.Hide
 End Sub
 
 ' The mouse wheel turned over this window (called by NVS_mail's wheel hook):
-' it scrolls the list under the pointer, or pages through the days.
+' it scrolls the list under the pointer.
 Public Sub NvsWheel(ByVal notches As Long)
     On Error Resume Next
-    If mPeopleOver Then
-        ScrollList lstPeople, -3 * notches
-    ElseIf lstSuggest.Visible Then
-        ScrollList lstSuggest, -3 * notches
-    ElseIf ActiveControl Is lstBest Then
-        ScrollList lstBest, -3 * notches
-    Else
-        PageDays IIf(notches > 0, -1, 1)
-    End If
-End Sub
-
-Private Sub ScrollList(ByVal lst As MSForms.ListBox, ByVal delta As Long)
-    Dim t As Long
-    If lst.ListCount = 0 Then Exit Sub
-    t = lst.TopIndex + delta
-    If t < 0 Then t = 0
-    If t > lst.ListCount - 1 Then t = lst.ListCount - 1
-    lst.TopIndex = t
+    If mOver = 1 Then ScrollPeople -3 * notches Else ScrollTimes -3 * notches
 End Sub
 
 '------------------------------------------------------------------------------
@@ -264,27 +334,53 @@ Private Sub BuildUI()
 
     Me.Caption = "Find a Time"
     Me.Font.Name = UI_FONT
-    SizeForm 900, 520
+    SizeForm 660, 430
     mIgnore = True
 
-    ' Left: people, length, hours, subject, Invite. Each label's Alt key
-    ' takes you to the box after it.
-    Set lblAdd = NewLabel(8, 8, 200, 12, "Add person (type a name)")
+    ' Left: add someone, the people. Each label's Alt key goes to what's
+    ' after it (the order they're made in is the Tab order).
+    Set lblAdd = NewLabel(Me, 8, 6, 120, 12, "Add someone")
     lblAdd.Accelerator = "A"
-    Set txtAdd = NewText(8, 21, 210)
-    txtAdd.ControlTipText = "Type part of a name. Enter adds them as required, Shift+Enter as optional. Ctrl+K: address book"
-    Set lblPeople = NewLabel(8, 44, 210, 12, "People   (Space: required / optional / off)")
+    Set txtAdd = NewText(Me, 8, 19, 200, 18)
+    txtAdd.ControlTipText = "Type part of a name and press Enter. Shift+Enter adds them as optional. Ctrl+K: address book"
+    Set lblAddHint = NewLabel(Me, 8, 40, 200, 12, "Enter adds them.   Ctrl+K: address book")
+    lblAddHint.ForeColor = C_GRAY
+    lblAddHint.Font.Size = 8
+    Set lblPeople = NewLabel(Me, 8, 62, 200, 12, "People")
     lblPeople.Accelerator = "P"
-    Set lstPeople = Me.Controls.Add("Forms.ListBox.1")
-    With lstPeople
-        .ColumnCount = 3
-        .MatchEntry = 2                     ' no jumping: typing adds a person
+    Set fraPeople = NewListFrame()
+    Set txtPeopleKeys = NewKeyCatcher(fraPeople)
+    Set sbPeople = NewScroll(fraPeople)
+    Set lblPeopleHit = NewLabel(fraPeople, 0, 0, 10, 10, "")
+    Set chkOut = Me.Controls.Add("Forms.CheckBox.1")
+    With chkOut
         .Font.Name = UI_FONT
         .Font.Size = 9
-        .IntegralHeight = False
+        .BackStyle = 0
+        .Accelerator = "O"
+        .ControlTipText = "They're on the chain but outside the firm, so their calendars can't be seen. Tick to put them on the invite too."
     End With
-    Set lblLen = NewLabel(8, 0, 38, 12, "Length")
+    Set lblOutNames = NewLabel(Me, 0, 0, 200, 22, "")
+    lblOutNames.ForeColor = C_GRAY
+    lblOutNames.Font.Size = 8
+    lblOutNames.WordWrap = True
+
+    ' Right: their times, the times list and its length.
+    Set lblTheir = NewLabel(Me, 0, 0, 300, 12, "Their times  (if someone sent you times they can do)")
+    lblTheir.Accelerator = "T"
+    Set txtTheir = NewText(Me, 0, 0, 300, 30)
+    With txtTheir
+        .MultiLine = True                   ' times pasted from an email keep their lines
+        .WordWrap = True
+        .EnterKeyBehavior = False
+        .ControlTipText = "Only these times are checked. Clear the box to see every free time."
+    End With
+    Set lblTheirInfo = NewLabel(Me, 0, 0, 300, 11, "")
+    lblTheirInfo.ForeColor = C_GRAY
+    lblTheirInfo.Font.Size = 8
+    Set lblLen = NewLabel(Me, 0, 0, 38, 12, "Length")
     lblLen.Accelerator = "L"
+    lblLen.TextAlign = 3                    ' right
     Set cboLen = Me.Controls.Add("Forms.ComboBox.1")
     With cboLen
         .Font.Name = UI_FONT
@@ -296,109 +392,77 @@ Private Sub BuildUI()
         .AddItem "90 min"
         .AddItem "2 hours"
         .MatchEntry = 1                     ' typing "4" picks "45 min"
+        .ControlTipText = "How long the meeting is. Up / Down to change it, or type it."
     End With
+    Set lblTimes = NewLabel(Me, 0, 0, 160, 12, "When everyone's free")
+    lblTimes.Accelerator = "W"
+    lblTimes.Font.Bold = True
+    lblTimes.WordWrap = False
+    lblTimes.AutoSize = True                ' as wide as its words (ShowHeader puts the note after it)
+    Set fraTimes = NewListFrame()
+    Set txtTimesKeys = NewKeyCatcher(fraTimes)
+    Set sbTimes = NewScroll(fraTimes)
+    Set lblTimesHit = NewLabel(fraTimes, 0, 0, 10, 10, "")
+    Set lblTimesInfo = NewLabel(Me, 0, 0, 160, 12, "")
+    lblTimesInfo.ForeColor = C_GRAY
+    lblTimesInfo.Font.Size = 8
+
+    ' Bottom: what Enter does, the buttons, the keys.
+    Set btnCopy = NewButton("Copy times")
+    btnCopy.Accelerator = "C"
+    btnCopy.TakeFocusOnClick = False        ' a click leaves the keyboard where it was
+    btnCopy.ControlTipText = "Copy the free times, to paste into a reply (Ctrl+C in the list)"
+    Set btnInvite = NewButton("Invite")
+    btnInvite.Accelerator = "I"
+    btnInvite.TakeFocusOnClick = False
+    btnInvite.ControlTipText = "Open the meeting invite for the selected time (Enter in the list). Nothing is sent."
+    Set lblStatus = NewLabel(Me, 0, 0, 400, 13, "")
+    Set lblKeys = NewLabel(Me, 0, 0, 640, 24, _
+        "Up/Down pick a time    Left/Right move it 15 min    PgUp/PgDn next day    " & _
+        "Enter invite (nothing is sent)    Ctrl+C copy the times" & vbCrLf & _
+        "Type to add someone    Alt+P people: Space = needed/optional, Del = remove    " & _
+        "Alt+T their times    F5 refresh    Esc close")
+    lblKeys.ForeColor = C_GRAY
+    lblKeys.Font.Size = 8
+    lblKeys.WordWrap = True
+
+    ' The suggestions under Add someone: in front of the people list.
+    Set fraSug = NewListFrame()
+    fraSug.SpecialEffect = 0
+    fraSug.BorderStyle = 1
+    fraSug.BorderColor = RGB(160, 160, 160)
+    fraSug.Visible = False
+    On Error Resume Next
+    fraSug.TabStop = False                  ' it never takes the keyboard
+    On Error GoTo 0
+    For i = 1 To NAME_ROWS
+        Set mSRowBack(i) = NewLabel(fraSug, 0, (i - 1) * ROW_H, 10, ROW_H, "")
+        mSRowBack(i).BackStyle = 1
+        Set mSRowName(i) = NewLabel(fraSug, 4, (i - 1) * ROW_H + 1, 10, ROW_H - 1, "")
+        mSRowName(i).WordWrap = False
+        Set mSRowAddr(i) = NewLabel(fraSug, 0, (i - 1) * ROW_H + 2, 10, ROW_H - 2, "")
+        mSRowAddr(i).WordWrap = False
+        mSRowAddr(i).ForeColor = C_GRAY
+        mSRowAddr(i).Font.Size = 8
+        mSRowAddr(i).TextAlign = 3          ' right
+    Next
+    Set lblSugHit = NewLabel(fraSug, 0, 0, 10, 10, "")
+
     mLen = FT_LENGTH
     cboLen.Text = LengthText(mLen)
-    Set lblHours = NewLabel(0, 0, 32, 12, "Hours")
-    lblHours.Accelerator = "H"
-    Set txtHours = NewText(0, 0, 60)
-    txtHours.Text = FT_HOURS
-    txtHours.ControlTipText = "The hours best times are looked for in, like 8am-6pm"
     If Not ParseHours(FT_HOURS, mHourFrom, mHourTo) Then
         mHourFrom = 8 * 60
         mHourTo = 18 * 60
     End If
-    Set chkTent = Me.Controls.Add("Forms.CheckBox.1")
-    With chkTent
-        .Caption = "Tentative counts as busy"
-        .Accelerator = "T"
-        .Value = FT_TENTATIVE_BUSY
-        .Font.Name = UI_FONT
-        .Font.Size = 9
-        .BackStyle = 0
-    End With
-    Set lblSubject = NewLabel(0, 0, 40, 12, "Subject")
-    lblSubject.Accelerator = "S"
-    Set txtSubject = NewText(0, 0, 160)
-    Set btnInvite = NewButton("Invite")
-    btnInvite.Accelerator = "I"
-    btnInvite.ControlTipText = "Open the meeting invite for the selected time (Ctrl+Enter)"
-    Set btnClose = NewButton("Close")
-
-    ' Right: Only at, the grid, best times.
-    Set lblOnly = NewLabel(0, 0, 42, 12, "Only at")
-    lblOnly.Accelerator = "O"
-    Set txtOnly = NewText(0, 0, 300)
-    txtOnly.ControlTipText = "Only these times are suggested. Clear it to look at every time."
-    Set lblOnlyInfo = NewLabel(0, 0, 300, 12, "")
-    lblOnlyInfo.ForeColor = RGB(110, 110, 110)
-    lblOnlyInfo.Font.Size = 8
-    Set lblGridCap = NewLabel(0, 0, 32, 24, "Grid")
-    lblGridCap.Accelerator = "G"
-    lblGridCap.ForeColor = RGB(110, 110, 110)
-    lblGridCap.Font.Size = 8
-    Set txtGrid = NewText(-60, 0, 20)       ' off screen: takes the keys for the grid
-    txtGrid.TabKeyBehavior = False
-    Set lblBest = NewLabel(0, 0, 230, 12, "Best times  (most people free first)")
-    lblBest.Accelerator = "B"
-    Set lstBest = Me.Controls.Add("Forms.ListBox.1")
-    With lstBest
-        .ColumnCount = 4
-        .MatchEntry = 2
-        .Font.Name = UI_FONT
-        .Font.Size = 9
-        .IntegralHeight = False
-    End With
-    Set lblStatus = NewLabel(0, 0, 400, 12, "")
-    lblStatus.ForeColor = RGB(96, 96, 96)
-    Set lblKeys = NewLabel(0, 0, 800, 24, "Enter on a time opens the invite (nothing is sent).   Type a name to add someone.   " & _
-        "Alt+B best times   Alt+O only at   Alt+G grid: arrows move, Space marks a time   " & _
-        "Alt+P people: Space = required / optional / off, Delete removes   Ctrl+K address book   F5 check again   Esc close")
-    lblKeys.ForeColor = RGB(120, 120, 120)
-    lblKeys.Font.Size = 8
-    lblKeys.WordWrap = True
-    Set btnPrev = NewButton("<")
-    btnPrev.TabStop = False
-    btnPrev.ControlTipText = "Earlier days (Page Up in the grid)"
-    Set btnNext = NewButton(">")
-    btnNext.TabStop = False
-    btnNext.ControlTipText = "Later days (Page Down in the grid)"
-
-    ' The grid's own time labels; its cells are made in Arrange.
-    mSlotN = (FT_GRID_TO - FT_GRID_FROM) * 2
-    ReDim mTimeLbl(0 To mSlotN - 1)
-    For i = 0 To mSlotN - 1
-        Set mTimeLbl(i) = NewLabel(0, 0, 30, 10, "")
-        mTimeLbl(i).Font.Size = 7
-        mTimeLbl(i).TextAlign = 3           ' right
-        mTimeLbl(i).ForeColor = RGB(96, 96, 96)
-        If i Mod 2 = 0 Then mTimeLbl(i).Caption = Format$(TimeSerial(FT_GRID_FROM + i \ 2, 0, 0), "h AM/PM")
-    Next
-    ReDim mCell(1 To MAX_COLS, 0 To mSlotN - 1)
-    ReDim mDayLbl(1 To MAX_COLS)
-    mColsMade = 0
-
-    Set lblCursor = NewLabel(0, 0, 10, 10, "")
-    lblCursor.BorderStyle = 1
-    lblCursor.BorderColor = RGB(0, 0, 0)
-    Set lblGridHit = NewLabel(0, 0, 10, 10, "")
-    Set lstSuggest = Me.Controls.Add("Forms.ListBox.1")
-    With lstSuggest
-        .ColumnCount = 2
-        .Font.Name = UI_FONT
-        .Font.Size = 9
-        .TabStop = False
-        .Visible = False
-        .SpecialEffect = 0
-        .BorderStyle = 1
-        .IntegralHeight = False
-    End With
-
     Set mFBCache = CreateObject("Scripting.Dictionary")
-    Set mMarks = CreateObject("Scripting.Dictionary")
-    w = Val(GetSetting("NVS_mail", "Window", "FindTimeWidth", "0"))
-    h = Val(GetSetting("NVS_mail", "Window", "FindTimeHeight", "0"))
-    If w >= 600 And h >= 380 Then
+    Set mInside = CreateObject("Scripting.Dictionary")
+    mPHover = 0
+    mTHover = 0
+
+    ' Reopens at the size you left it (made to fit the screen when shown).
+    w = Val(GetSetting("NVS_mail", "Window", "FindTime2Width", "0"))
+    h = Val(GetSetting("NVS_mail", "Window", "FindTime2Height", "0"))
+    If w >= 520 And h >= 320 Then
         Me.Width = w
         Me.Height = h
     End If
@@ -406,119 +470,149 @@ Private Sub BuildUI()
     mBuilt = True
 End Sub
 
-' Fits everything to the window's size: the grid gets what's left between
-' the people (left) and the best times (right).
+' Fits everything to the window's size: the people on the left, the times
+' on the right, and as many rows in each as there's room for.
 Private Sub Arrange()
-    Dim w As Single, h As Single, lx As Single, lw As Single, tx As Single, tw As Single
-    Dim bw As Single, gw As Single, y As Single, gridBottom As Single, half As Single, keysH As Single
-    Dim c As Long, s As Long, timeW As Single, cols As Long
+    Dim w As Single, h As Single, lw As Single, rx As Single, rw As Single, bottom As Single
+    Dim outH As Single, listTop As Single
 
     If Not mBuilt Then Exit Sub
     On Error Resume Next
     w = Me.InsideWidth
     h = Me.InsideHeight
-    If w < 560 Then w = 560
-    If h < 340 Then h = 340
-    If w < 820 Then lw = 180 Else lw = 210
-    If w < 820 Then bw = 190 Else bw = 236
-    lx = 8
-    keysH = 24
+    If w < 520 Then w = 520
+    If h < 300 Then h = 300
+    If w >= 640 Then lw = 220 Else lw = 190
+    rx = 8 + lw + 12
+    rw = w - rx - 8
+    bottom = h - 54                         ' top of the bottom area
+    listTop = 84
 
-    ' Left column
-    lblAdd.Move lx, 8, lw, 12
-    txtAdd.Move lx, 21, lw, 18
-    lblPeople.Move lx, 44, lw, 12
-    y = h - keysH - 6 - 96                  ' top of the boxes under the people
-    lstPeople.Move lx, 57, lw, y - 57 - 4
-    lstPeople.ColumnWidths = CStr(CLng(lw - 82)) & " pt;32 pt;40 pt"
-    lstSuggest.Move lx, 40, lw, NAME_ROWS * 12 + 4
-    lstSuggest.ColumnWidths = CStr(CLng(lw - 6)) & " pt;0 pt"
-    lblLen.Move lx, y + 3, 38, 12
-    cboLen.Move lx + 40, y, 70, 18
-    lblHours.Move lx + 116, y + 3, 32, 12
-    txtHours.Move lx + 150, y, lw - 150, 18
-    y = y + 22
-    chkTent.Move lx, y, lw, 16
-    y = y + 20
-    lblSubject.Move lx, y + 3, 40, 12
-    txtSubject.Move lx + 42, y, lw - 42, 18
-    y = y + 26
-    half = (lw - 6) / 2
-    btnInvite.Move lx, y, half, 24
-    btnClose.Move lx + half + 6, y, half, 24
+    ' Left
+    lblAdd.Move 8, 6, lw, 12
+    txtAdd.Move 8, 19, lw, 18
+    lblAddHint.Move 8, 40, lw, 12
+    lblPeople.Move 8, 68, lw, 12
+    If mON > 0 Then outH = 44
+    fraPeople.Move 8, listTop, lw, bottom - listTop - 4 - outH
+    chkOut.Move 8, bottom - outH + 2, lw, 16
+    lblOutNames.Move 22, bottom - outH + 18, lw - 14, 22
+    chkOut.Visible = (mON > 0)
+    lblOutNames.Visible = (mON > 0)
 
-    ' Right part: Only at across the top, then the grid and best times.
-    tx = lx + lw + 14
-    tw = w - tx - 8
-    lblOnly.Move tx, 11, 42, 12
-    txtOnly.Move tx + 44, 8, tw - 44, 18
-    lblOnlyInfo.Move tx + 44, 28, tw - 44, 12
-    gridBottom = h - keysH - 22
-    gw = tw - bw - 10
-    timeW = 34
-    lblGridCap.Move tx, 46, timeW - 4, 24
+    ' Right
+    lblTheir.Move rx, 6, rw, 12
+    txtTheir.Move rx, 19, rw, 30
+    lblTheirInfo.Move rx, 50, rw, 11
+    lblTimes.Move rx, 68
+    cboLen.Move rx + rw - 66, 64, 66, 18
+    lblLen.Move rx + rw - 66 - 40, 67, 36, 12
+    fraTimes.Move rx, listTop, rw, bottom - listTop - 4
 
-    cols = Int((gw - timeW - 16) / 26)
-    If cols > MAX_COLS Then cols = MAX_COLS
-    If cols > mDayN Then cols = mDayN
-    If cols < 1 Then cols = 1
-    mShowCols = cols
-    MakeColumns cols
-    mCW = (gw - timeW - 16) / cols
-    If mCW > 48 Then mCW = 48
-    mGX = tx + timeW
-    mGY = 46 + 26
-    mCH = (gridBottom - mGY) / mSlotN
-    If mCH > 17 Then mCH = 17
-    If mCH < 7 Then mCH = 7
-    For c = 1 To mColsMade
-        mDayLbl(c).Move mGX + (c - 1) * mCW, 46, mCW - 1, 24
-        mDayLbl(c).Visible = (c <= cols)
-        For s = 0 To mSlotN - 1
-            mCell(c, s).Move mGX + (c - 1) * mCW, mGY + s * mCH, mCW - 1, mCH - 1
-            mCell(c, s).Visible = (c <= cols)
-        Next
-    Next
-    For s = 0 To mSlotN - 1
-        mTimeLbl(s).Move tx, mGY + s * mCH - 4, timeW - 4, 10
-    Next
-    btnPrev.Move mGX + cols * mCW + 2, 46, 14, 12
-    btnNext.Move mGX + cols * mCW + 2, 59, 14, 12
-    lblGridHit.Move mGX, mGY, cols * mCW, mSlotN * mCH
-    lblGridHit.ZOrder 0
-    lblCursor.ZOrder 0
-    lblGridHit.ZOrder 0
+    ' Bottom
+    btnInvite.Move w - 8 - 84, bottom + 2, 84, 22
+    btnCopy.Move w - 8 - 84 - 6 - 84, bottom + 2, 84, 22
+    lblStatus.Move 8, bottom + 7, w - 16 - 180, 13
+    lblKeys.Move 8, bottom + 29, w - 16, 24
 
-    lblBest.Move tx + gw + 10, 46, bw, 12
-    lstBest.Move tx + gw + 10, 60, bw, gridBottom - 60
-    lstBest.ColumnWidths = "54 pt;50 pt;" & CStr(CLng(bw - 112)) & " pt;0 pt"
-    lblStatus.Move tx, gridBottom + 5, tw, 12
-    lblKeys.Move lx, h - keysH - 2, w - 16, keysH
-    lstSuggest.ZOrder 0
-
-    If mFirstCol > mDayN - cols + 1 Then mFirstCol = mDayN - cols + 1
-    If mFirstCol < 1 Then mFirstCol = 1
-    PaintGrid
+    MakePeopleRows
+    MakeTimeRows
+    If fraSug.Visible Then ShowSugRows
+    KeepPersonVisible
+    KeepRowVisible
+    PaintPeople
+    PaintTimes
 End Sub
 
-' Makes the grid's cells for this many days on screen (once; kept after).
-Private Sub MakeColumns(ByVal cols As Long)
-    Dim c As Long, s As Long
-    If cols <= mColsMade Then Exit Sub
-    For c = mColsMade + 1 To cols
-        Set mDayLbl(c) = NewLabel(0, 0, 30, 24, "")
-        mDayLbl(c).Font.Size = 8
-        mDayLbl(c).TextAlign = 2            ' centered
-        For s = 0 To mSlotN - 1
-            Set mCell(c, s) = NewLabel(0, 0, 20, 8, "")
-            mCell(c, s).BackStyle = 1
-            mCell(c, s).BackColor = C_OFF
-            mCell(c, s).Font.Size = 7
-            mCell(c, s).TextAlign = 2
+' Rows for the people list, as many as fit (made once, kept after).
+Private Sub MakePeopleRows()
+    Dim k As Long
+    mPSlots = Int((fraPeople.InsideHeight - 2) / ROW_H)
+    If mPSlots < 1 Then mPSlots = 1
+    If mPSlotsMade < mPSlots Then
+        ReDim Preserve mPRowBack(0 To mPSlots - 1)
+        ReDim Preserve mPRowName(0 To mPSlots - 1)
+        ReDim Preserve mPRowTag(0 To mPSlots - 1)
+        ReDim Preserve mPRowStat(0 To mPSlots - 1)
+        For k = mPSlotsMade To mPSlots - 1
+            Set mPRowBack(k) = NewLabel(fraPeople, 0, k * ROW_H + 1, 10, ROW_H, "")
+            mPRowBack(k).BackStyle = 1
+            Set mPRowName(k) = NewLabel(fraPeople, 4, k * ROW_H + 2, 10, ROW_H - 2, "")
+            mPRowName(k).WordWrap = False
+            Set mPRowTag(k) = NewLabel(fraPeople, 0, k * ROW_H + 3, 40, ROW_H - 3, "optional")
+            mPRowTag(k).WordWrap = False
+            mPRowTag(k).Font.Size = 8
+            mPRowTag(k).ForeColor = C_GRAY
+            Set mPRowStat(k) = NewLabel(fraPeople, 0, k * ROW_H + 2, 54, ROW_H - 2, "")
+            mPRowStat(k).WordWrap = False
         Next
+        mPSlotsMade = mPSlots
+        lblPeopleHit.ZOrder 0               ' the click area stays on top of the rows
+    End If
+    For k = mPSlots To mPSlotsMade - 1      ' rows that no longer fit
+        mPRowBack(k).Visible = False
+        mPRowName(k).Visible = False
+        mPRowTag(k).Visible = False
+        mPRowStat(k).Visible = False
     Next
-    mColsMade = cols
+    sbPeople.Move fraPeople.InsideWidth - 12, 0, 12, fraPeople.InsideHeight
+    lblPeopleHit.Move 0, 0, fraPeople.InsideWidth, fraPeople.InsideHeight
 End Sub
+
+' Rows for the times list.
+Private Sub MakeTimeRows()
+    Dim k As Long
+    mTSlots = Int((fraTimes.InsideHeight - 2) / ROW_H)
+    If mTSlots < 1 Then mTSlots = 1
+    If mTSlotsMade < mTSlots Then
+        ReDim Preserve mTRowBack(0 To mTSlots - 1)
+        ReDim Preserve mTRowDay(0 To mTSlots - 1)
+        ReDim Preserve mTRowTime(0 To mTSlots - 1)
+        ReDim Preserve mTRowNote(0 To mTSlots - 1)
+        For k = mTSlotsMade To mTSlots - 1
+            Set mTRowBack(k) = NewLabel(fraTimes, 0, k * ROW_H + 1, 10, ROW_H, "")
+            mTRowBack(k).BackStyle = 1
+            Set mTRowDay(k) = NewLabel(fraTimes, 6, k * ROW_H + 2, 66, ROW_H - 2, "")
+            mTRowDay(k).WordWrap = False
+            Set mTRowTime(k) = NewLabel(fraTimes, 76, k * ROW_H + 2, 118, ROW_H - 2, "")
+            mTRowTime(k).WordWrap = False
+            Set mTRowNote(k) = NewLabel(fraTimes, 196, k * ROW_H + 2, 10, ROW_H - 2, "")
+            mTRowNote(k).WordWrap = False
+        Next
+        mTSlotsMade = mTSlots
+        lblTimesHit.ZOrder 0
+    End If
+    For k = mTSlots To mTSlotsMade - 1
+        mTRowBack(k).Visible = False
+        mTRowDay(k).Visible = False
+        mTRowTime(k).Visible = False
+        mTRowNote(k).Visible = False
+    Next
+    sbTimes.Move fraTimes.InsideWidth - 12, 0, 12, fraTimes.InsideHeight
+    lblTimesHit.Move 0, 0, fraTimes.InsideWidth, fraTimes.InsideHeight
+End Sub
+
+' Shows which of the chain's people are outside the firm, with the box to
+' invite them too.
+Private Sub ShowOutside()
+    Dim i As Long, s As String
+    If mON = 1 Then
+        chkOut.Caption = "Also invite the 1 outside the firm"
+    Else
+        chkOut.Caption = "Also invite the " & mON & " outside the firm"
+    End If
+    For i = 1 To mON
+        If i > 1 Then s = s & ", "
+        s = s & mOName(i)
+    Next
+    lblOutNames.Caption = s
+    chkOut.Visible = (mON > 0)
+    lblOutNames.Visible = (mON > 0)
+End Sub
+
+'------------------------------------------------------------------------------
+' Building blocks
+'------------------------------------------------------------------------------
 
 ' Sets the size of the area inside the window's border.
 Private Sub SizeForm(ByVal insideW As Single, ByVal insideH As Single)
@@ -526,22 +620,24 @@ Private Sub SizeForm(ByVal insideW As Single, ByVal insideH As Single)
     Me.Height = insideH + (Me.Height - Me.InsideHeight)
 End Sub
 
-Private Function NewLabel(ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single, _
-                          ByVal cap As String) As MSForms.Label
+Private Function NewLabel(ByVal host As Object, ByVal l As Single, ByVal t As Single, _
+                          ByVal w As Single, ByVal h As Single, ByVal cap As String) As MSForms.Label
     Dim c As MSForms.Label
-    Set c = Me.Controls.Add("Forms.Label.1")
+    Set c = host.Controls.Add("Forms.Label.1")
     c.Move l, t, w, h
     c.Caption = cap
-    c.BackStyle = 0
+    c.BackStyle = 0                         ' transparent
     c.Font.Name = UI_FONT
     c.Font.Size = 9
+    c.ForeColor = C_TEXT
     Set NewLabel = c
 End Function
 
-Private Function NewText(ByVal l As Single, ByVal t As Single, ByVal w As Single) As MSForms.TextBox
+Private Function NewText(ByVal host As Object, ByVal l As Single, ByVal t As Single, _
+                         ByVal w As Single, ByVal h As Single) As MSForms.TextBox
     Dim c As MSForms.TextBox
-    Set c = Me.Controls.Add("Forms.TextBox.1")
-    c.Move l, t, w, 18
+    Set c = host.Controls.Add("Forms.TextBox.1")
+    c.Move l, t, w, h
     c.Font.Name = UI_FONT
     c.Font.Size = 9
     Set NewText = c
@@ -554,6 +650,36 @@ Private Function NewButton(ByVal cap As String) As MSForms.CommandButton
     c.Font.Name = UI_FONT
     c.Font.Size = 9
     Set NewButton = c
+End Function
+
+' A white, sunken box for a list (rows are labels, so it looks the same on
+' every screen).
+Private Function NewListFrame() As MSForms.Frame
+    Dim f As MSForms.Frame
+    Set f = Me.Controls.Add("Forms.Frame.1")
+    f.Caption = ""
+    f.SpecialEffect = 2                     ' sunken, like a list box
+    f.BackColor = C_WHITE
+    Set NewListFrame = f
+End Function
+
+' An invisible box that takes the keyboard for a list. It sits outside its
+' frame's visible area, so it's never seen.
+Private Function NewKeyCatcher(ByVal host As Object) As MSForms.TextBox
+    Dim c As MSForms.TextBox
+    Set c = NewText(host, -40, 0, 20, 12)
+    c.TabKeyBehavior = False
+    c.EnterKeyBehavior = False
+    Set NewKeyCatcher = c
+End Function
+
+Private Function NewScroll(ByVal host As Object) As MSForms.ScrollBar
+    Dim c As MSForms.ScrollBar
+    Set c = host.Controls.Add("Forms.ScrollBar.1")
+    c.Orientation = 0                       ' vertical
+    c.TabStop = False
+    c.Visible = False
+    Set NewScroll = c
 End Function
 
 Private Sub SetStatus(ByVal s As String)
@@ -570,54 +696,117 @@ End Function
 ' People
 '==============================================================================
 
-' Adds someone (or, if they're on already, makes them required if asked).
-' Returns their row, or 0 if they weren't added (no address, or it's you).
-Private Function AddPersonRow(ByVal nm As String, ByVal addr As String, ByVal role As String) As Long
-    Dim i As Long, k As String, v As Variant
+' You: always person 1, always looked at.
+Private Sub AddMe()
+    Dim addr As String
+    addr = NVS_MyAddress()
+    If addr = "" Then addr = MyName()
+    mPN = 1
+    mPName(1) = "You"
+    mPAddr(1) = addr
+    mPRole(1) = "R"
+    mPFB(1) = ""
+    mPState(1) = 0
+    UseCachedCalendar 1
+End Sub
+
+' Someone from the chain: shown if they're inside the firm, otherwise kept
+' for "Also invite".
+Private Sub AddChainPerson(ByVal nm As String, ByVal addr As String, ByVal role As String)
+    Dim i As Long
+    addr = Trim$(addr)
+    If addr = "" Then Exit Sub
+    If NVS_IsMe(addr) Then Exit Sub
+    If IsInside(addr) Then
+        AddPersonRow nm, addr, role, True
+        Exit Sub
+    End If
+    For i = 1 To mON
+        If StrComp(mOAddr(i), addr, vbTextCompare) = 0 Then
+            If role = "R" Then mORole(i) = "R"
+            Exit Sub
+        End If
+    Next
+    mON = mON + 1
+    If mON > UBound(mOName) Then
+        ReDim Preserve mOName(1 To 2 * mON)
+        ReDim Preserve mOAddr(1 To 2 * mON)
+        ReDim Preserve mORole(1 To 2 * mON)
+    End If
+    If Trim$(nm) = "" Then nm = addr
+    mOName(mON) = Trim$(nm)
+    mOAddr(mON) = addr
+    mORole(mON) = role
+End Sub
+
+' Adds someone to the people list (or, if they're on it already, makes them
+' needed if asked). Returns their row, or 0 if they weren't added.
+Private Function AddPersonRow(ByVal nm As String, ByVal addr As String, ByVal role As String, _
+                              ByVal inside As Boolean) As Long
+    Dim i As Long
     addr = Trim$(addr)
     nm = Trim$(nm)
     If addr = "" Then Exit Function
+    If Len(nm) > 2 And Left$(nm, 1) = "'" And Right$(nm, 1) = "'" Then nm = Mid$(nm, 2, Len(nm) - 2)
     If nm = "" Then nm = addr
-    For i = 1 To mPN
-        If StrComp(mPAddr(i), addr, vbTextCompare) = 0 Then
-            If role = "R" And mPRole(i) <> "You" Then mPRole(i) = "R"
-            AddPersonRow = i
-            Exit Function
-        End If
-    Next
-    If role <> "You" Then
-        If NVS_IsMe(addr) Then Exit Function
+    i = PersonIndex(addr)
+    If i > 0 Then
+        If role = "R" Then mPRole(i) = "R"
+        AddPersonRow = i
+        Exit Function
     End If
+    If NVS_IsMe(addr) Then Exit Function
     mPN = mPN + 1
     If mPN > UBound(mPName) Then
         ReDim Preserve mPName(1 To 2 * mPN)
         ReDim Preserve mPAddr(1 To 2 * mPN)
         ReDim Preserve mPRole(1 To 2 * mPN)
         ReDim Preserve mPFB(1 To 2 * mPN)
+        ReDim Preserve mPFBDay(1 To 2 * mPN)
         ReDim Preserve mPState(1 To 2 * mPN)
     End If
     mPName(mPN) = nm
     mPAddr(mPN) = addr
     mPRole(mPN) = role
     mPFB(mPN) = ""
-    mPState(mPN) = 0
-    ' A calendar read in the last ten minutes is used again.
-    k = LCase$(addr)
-    If mFBCache.Exists(k) Then
-        v = mFBCache(k)
-        If CDbl(v(3)) = CDbl(Date) And Elapsed(CSng(v(2))) < 600 Then
-            mPFB(mPN) = v(0)
-            mPState(mPN) = v(1)
-        End If
+    If inside Then
+        mPState(mPN) = 0
+        UseCachedCalendar mPN
+    Else
+        mPState(mPN) = 3                    ' outside the firm: invited, calendar not looked for
     End If
     AddPersonRow = mPN
+End Function
+
+' A calendar read in the last ten minutes is used again.
+Private Sub UseCachedCalendar(ByVal i As Long)
+    Dim k As String, v As Variant
+    k = LCase$(mPAddr(i))
+    If Not mFBCache.Exists(k) Then Exit Sub
+    v = mFBCache(k)
+    If Elapsed(CSng(v(2))) < 600 And CDbl(v(3)) = CDbl(Date) Then
+        mPFB(i) = v(0)
+        mPState(i) = v(1)
+        mPFBDay(i) = CDate(v(3))
+    End If
+End Sub
+
+Private Function PersonIndex(ByVal addr As String) As Long
+    Dim i As Long
+    For i = 1 To mPN
+        If StrComp(mPAddr(i), addr, vbTextCompare) = 0 Then
+            PersonIndex = i
+            Exit Function
+        End If
+    Next
 End Function
 
 Private Sub RemovePerson(ByVal i As Long)
     Dim j As Long
     If i < 1 Or i > mPN Then Exit Sub
-    If mPRole(i) = "You" Then
-        Beep
+    If i = 1 Then
+        Beep                                ' you're always in it
+        SetStatus "You're always in it - Space makes you optional."
         Exit Sub
     End If
     For j = i To mPN - 1
@@ -625,94 +814,99 @@ Private Sub RemovePerson(ByVal i As Long)
         mPAddr(j) = mPAddr(j + 1)
         mPRole(j) = mPRole(j + 1)
         mPFB(j) = mPFB(j + 1)
+        mPFBDay(j) = mPFBDay(j + 1)
         mPState(j) = mPState(j + 1)
     Next
     mPN = mPN - 1
-    Recompute
-    If lstPeople.ListCount > 0 Then
-        If i - 1 >= lstPeople.ListCount Then i = lstPeople.ListCount
-        lstPeople.ListIndex = i - 1
-    End If
+    If mPSel > mPN Then mPSel = mPN
+    KeepPersonVisible
+    BuildRows
 End Sub
 
-' Space on a person: required -> optional -> not invited -> required.
-Private Sub CycleRole(ByVal i As Long)
+' Space on a person: needed <-> optional. Optional people are invited, but
+' the times don't wait for them.
+Private Sub ToggleRole(ByVal i As Long)
     If i < 1 Or i > mPN Then Exit Sub
-    Select Case mPRole(i)
-        Case "R": mPRole(i) = "O"
-        Case "O": mPRole(i) = "X"
-        Case "X": mPRole(i) = "R"
-        Case Else
-            Beep                                ' you're always in it
-            Exit Sub
-    End Select
-    Recompute
+    If mPRole(i) = "O" Then mPRole(i) = "R" Else mPRole(i) = "O"
+    BuildRows
 End Sub
 
-' Fills the people list: name, role, and whether they're free at the
-' selected time.
-Private Sub ShowPeople()
-    Dim arr() As String, i As Long, keep As Long
-    keep = lstPeople.ListIndex
-    mIgnore = True
-    If mPN = 0 Then
-        lstPeople.Clear
+' True if this address is inside your firm: your domain (or one in
+' FT_INSIDE_DOMAINS), or a mailbox in your firm's address book.
+Private Function IsInside(ByVal addr As String) As Boolean
+    Dim k As String, dom As String, r As Outlook.Recipient
+    k = LCase$(Trim$(addr))
+    If mInside.Exists(k) Then
+        IsInside = mInside(k)
+        Exit Function
+    End If
+    dom = DomainOf(k)
+    If dom = "" Then
+        IsInside = True                     ' an address book name, not an email address
+    ElseIf InsideDomain(dom) Then
+        IsInside = True
     Else
-        ReDim arr(0 To mPN - 1, 0 To 2)
-        For i = 1 To mPN
-            arr(i - 1, 0) = mPName(i)
-            Select Case mPRole(i)
-                Case "You": arr(i - 1, 1) = "you"
-                Case "R": arr(i - 1, 1) = "req"
-                Case "O": arr(i - 1, 1) = "opt"
-                Case Else: arr(i - 1, 1) = "off"
-            End Select
-            arr(i - 1, 2) = StatusWord(i, mCurD, mCurS)
-        Next
-        lstPeople.List = arr
-        If keep >= 0 And keep < mPN Then lstPeople.ListIndex = keep
+        On Error Resume Next
+        Set r = Application.Session.CreateRecipient(addr)
+        r.Resolve
+        If r.Resolved Then IsInside = (r.AddressEntry.AddressEntryUserType = olExchangeUserAddressEntry)
+        On Error GoTo 0
     End If
-    mIgnore = False
-End Sub
+    mInside(k) = IsInside
+End Function
 
-' "free", "busy", "tent.", "away" (out of office), "?" (calendar can't be
-' read) or "..." (still being read) for person i at the time (d, s).
-Private Function StatusWord(ByVal i As Long, ByVal d As Long, ByVal s As Long) As String
-    If mPRole(i) = "X" Then Exit Function
-    If mPState(i) = 0 Then
-        StatusWord = "..."
-    ElseIf mPState(i) = 2 Then
-        StatusWord = "?"
-    ElseIf d >= 1 And d <= mDayN Then
-        Select Case SpanStatus(i, d, s)
-            Case 0: StatusWord = "free"
-            Case 1: StatusWord = "tent."
-            Case 2: StatusWord = "busy"
-            Case 3: StatusWord = "away"
-        End Select
+Private Function DomainOf(ByVal addr As String) As String
+    Dim p As Long
+    p = InStrRev(addr, "@")
+    If p > 0 Then DomainOf = LCase$(Trim$(Mid$(addr, p + 1)))
+End Function
+
+' Your domain or one of FT_INSIDE_DOMAINS, or a part of one ("ny.bank.com"
+' and "bank.com" go together).
+Private Function InsideDomain(ByVal dom As String) As Boolean
+    Dim d As Variant, mine As String
+    mine = DomainOf(NVS_MyAddress())
+    If mine <> "" Then
+        If SameFirm(dom, mine) Then
+            InsideDomain = True
+            Exit Function
+        End If
     End If
+    For Each d In Split(Replace(Replace(FT_INSIDE_DOMAINS, ";", ","), " ", ""), ",")
+        If CStr(d) <> "" Then
+            If SameFirm(dom, LCase$(Replace(CStr(d), "@", ""))) Then
+                InsideDomain = True
+                Exit Function
+            End If
+        End If
+    Next
+End Function
+
+Private Function SameFirm(ByVal a As String, ByVal b As String) As Boolean
+    If a = "" Or b = "" Then Exit Function
+    SameFirm = (a = b) Or (Right$(a, Len(b) + 1) = "." & b) Or (Right$(b, Len(a) + 1) = "." & a)
 End Function
 
 '------------------------------------------------------------------------------
 ' Adding people by typing
 '------------------------------------------------------------------------------
 
-' Enter in Add person: the highlighted suggestion, or whoever the typed text
-' finds in the address book. role "R" or "O".
+' Enter in Add someone: the highlighted suggestion, or whoever the typed text
+' finds in the address book. role "R" (needed) or "O" (optional).
 Private Sub AddFromBox(ByVal role As String)
     Dim txt As String, nm As String, addr As String, r As Outlook.Recipient
     txt = Trim$(txtAdd.Text)
-    If lstSuggest.Visible And lstSuggest.ListIndex >= 0 Then
-        nm = lstSuggest.List(lstSuggest.ListIndex, 0)
-        addr = lstSuggest.List(lstSuggest.ListIndex, 1)
+    If fraSug.Visible And mSugSel >= 1 And mSugSel <= mSugN Then
+        nm = mSugName(mSugSel)
+        addr = mSugAddr(mSugSel)
         If addr = "" Then addr = nm
     ElseIf txt = "" Then
-        GoBest
+        FocusList 2
         Exit Sub
     Else
         addr = txt
     End If
-    lstSuggest.Visible = False
+    HideSug
 
     Set r = Nothing
     On Error Resume Next
@@ -726,8 +920,7 @@ Private Sub AddFromBox(ByVal role As String)
         End If
     End If
     If InStr(txt, "@") > 0 And InStr(txt, " ") = 0 Then
-        ' Someone outside the address book: invited, but their calendar can't be seen.
-        AddTyped txt, txt, role
+        AddTyped txt, txt, role             ' someone not in any address book
     Else
         SetStatus "No one called '" & IIf(nm <> "", nm, txt) & "' in the address book. Ctrl+K opens it."
         Beep
@@ -742,9 +935,9 @@ Private Sub AddResolved(ByVal r As Outlook.Recipient, ByVal role As String)
 End Sub
 
 Private Sub AddTyped(ByVal nm As String, ByVal addr As String, ByVal role As String)
-    Dim i As Long, had As Long
+    Dim i As Long, had As Long, j As Long
     had = mPN
-    i = AddPersonRow(nm, addr, role)
+    i = AddPersonRow(nm, addr, role, IsInside(addr))
     mIgnore = True
     txtAdd.Text = ""
     mIgnore = False
@@ -752,16 +945,40 @@ Private Sub AddTyped(ByVal nm As String, ByVal addr As String, ByVal role As Str
         SetStatus "That's you - you're always in it."
         Exit Sub
     End If
-    Recompute
-    lstPeople.ListIndex = i - 1
-    If mPN > had Then SetStatus "Added " & nm & IIf(role = "O", " (optional)", "")
+    ' Someone outside the firm from the chain, added by name: now on the list instead.
+    For j = mON To 1 Step -1
+        If StrComp(mOAddr(j), addr, vbTextCompare) = 0 Then RemoveOutside j
+    Next
+    mPSel = i
+    KeepPersonVisible
+    BuildRows
+    If mPN > had Then
+        If mPState(i) = 3 Then
+            SetStatus "Added " & nm & " - outside the firm, so their calendar can't be seen."
+        Else
+            SetStatus "Added " & nm & IIf(role = "O", " (optional)", "")
+        End If
+    End If
     LoadCalendars
+End Sub
+
+Private Sub RemoveOutside(ByVal j As Long)
+    Dim k As Long
+    For k = j To mON - 1
+        mOName(k) = mOName(k + 1)
+        mOAddr(k) = mOAddr(k + 1)
+        mORole(k) = mORole(k + 1)
+    Next
+    mON = mON - 1
+    ShowOutside
+    Arrange
 End Sub
 
 ' Ctrl+K: Outlook's address book, with Required and Optional boxes.
 Private Sub PickFromAddressBook()
-    Dim dlg As Outlook.SelectNamesDialog, i As Long, r As Outlook.Recipient
+    Dim dlg As Outlook.SelectNamesDialog, i As Long, r As Outlook.Recipient, addr As String
     On Error GoTo Done
+    HideSug
     Set dlg = Application.Session.GetSelectNamesDialog
     dlg.SetDefaultDisplayMode olDefaultMeeting
     dlg.Caption = "Find a Time - add people"
@@ -770,28 +987,29 @@ Private Sub PickFromAddressBook()
         Set r = dlg.Recipients.Item(i)
         r.Resolve
         If r.Resolved Then
-            If r.Type = olOptional Then
-                AddPersonRow r.Name, NVS_AddressOf(r), "O"
-            Else
-                AddPersonRow r.Name, NVS_AddressOf(r), "R"
-            End If
+            addr = NVS_AddressOf(r)
+            If addr = "" Then addr = r.Address
+            AddPersonRow r.Name, addr, IIf(r.Type = olOptional, "O", "R"), IsInside(addr)
         End If
     Next
-    Recompute
+    BuildRows
     LoadCalendars
 Done:
 End Sub
 
-' Suggestions under Add person as you type: people from your recent mail
-' whose name has words starting with what you typed, the ones you email
-' most first.
+'------------------------------------------------------------------------------
+' Suggestions under Add someone
+'------------------------------------------------------------------------------
+
+' People from your recent mail whose name has words starting with what you
+' typed, the ones you email most first.
 Private Sub Suggest()
     Dim q As String, words() As String, k As Variant, v As Variant, n As Long, i As Long, j As Long
-    Dim nm() As String, ad() As String, ct() As Long, best As Long, rows As Long, arr() As String
+    Dim nm() As String, ad() As String, ct() As Long, best As Long
 
     q = LCase$(Trim$(txtAdd.Text))
     If Len(q) < 2 Then
-        lstSuggest.Visible = False
+        HideSug
         Exit Sub
     End If
     If mNames Is Nothing Then LoadNames
@@ -801,7 +1019,7 @@ Private Sub Suggest()
     ReDim ct(1 To 400)
     For Each k In mNames.Keys
         v = mNames(k)
-        If NameMatches(CStr(k), CStr(v(1)), q, words) And Not AlreadyIn(CStr(v(0))) Then
+        If NameMatches(CStr(k), CStr(v(1)), q, words) And Not AlreadyIn(CStr(v(0)), CStr(v(1))) Then
             n = n + 1
             nm(n) = v(0)
             ad(n) = v(1)
@@ -810,13 +1028,12 @@ Private Sub Suggest()
         End If
     Next
     If n = 0 Then
-        lstSuggest.Visible = False
+        HideSug
         Exit Sub
     End If
-    rows = n
-    If rows > NAME_ROWS Then rows = NAME_ROWS
-    ReDim arr(0 To rows - 1, 0 To 1)
-    For i = 1 To rows                       ' the most emailed first
+    mSugN = n
+    If mSugN > NAME_ROWS Then mSugN = NAME_ROWS
+    For i = 1 To mSugN                      ' the most emailed first
         best = 0
         For j = 1 To n
             If ct(j) >= 0 Then
@@ -827,24 +1044,67 @@ Private Sub Suggest()
                 End If
             End If
         Next
-        arr(i - 1, 0) = nm(best)
-        arr(i - 1, 1) = ad(best)
+        mSugName(i) = nm(best)
+        mSugAddr(i) = ad(best)
         ct(best) = -1
     Next
-    lstSuggest.List = arr
-    lstSuggest.ListIndex = 0
-    lstSuggest.Height = rows * 12 + 4
-    lstSuggest.Visible = True
-    lstSuggest.ZOrder 0
+    mSugSel = 1
+    ShowSugRows
 End Sub
 
-Private Function AlreadyIn(ByVal nm As String) As Boolean
-    Dim i As Long
-    For i = 1 To mPN
-        If StrComp(mPName(i), nm, vbTextCompare) = 0 Then
-            AlreadyIn = True
-            Exit Function
+' Draws the suggestions, under the Add someone box and in front of the people.
+Private Sub ShowSugRows()
+    Dim i As Long, w As Single, aw As Single
+    On Error Resume Next
+    w = txtAdd.Width
+    fraSug.Move txtAdd.Left, txtAdd.Top + txtAdd.Height + 1, w, mSugN * ROW_H + 4
+    For i = 1 To NAME_ROWS
+        If i <= mSugN Then
+            mSRowBack(i).Move 0, (i - 1) * ROW_H, fraSug.InsideWidth, ROW_H
+            If i = mSugSel Then mSRowBack(i).BackColor = C_SEL Else mSRowBack(i).BackColor = C_WHITE
+            mSRowAddr(i).Caption = DomainOf(mSugAddr(i))
+            If mSRowAddr(i).Caption = "" Then aw = 0 Else aw = 84
+            mSRowName(i).Move 4, (i - 1) * ROW_H + 1, fraSug.InsideWidth - 8 - aw, ROW_H - 1
+            mSRowName(i).Caption = mSugName(i)
+            mSRowAddr(i).Move fraSug.InsideWidth - 4 - aw, (i - 1) * ROW_H + 2, aw, ROW_H - 2
+            mSRowBack(i).Visible = True
+            mSRowName(i).Visible = True
+            mSRowAddr(i).Visible = (aw > 0)
+        Else
+            mSRowBack(i).Visible = False
+            mSRowName(i).Visible = False
+            mSRowAddr(i).Visible = False
         End If
+    Next
+    lblSugHit.Move 0, 0, fraSug.InsideWidth, fraSug.InsideHeight
+    lblSugHit.ZOrder 0
+    fraSug.Visible = True
+    fraSug.ZOrder 0
+End Sub
+
+Private Sub HideSug()
+    If fraSug Is Nothing Then Exit Sub
+    If fraSug.Visible Then fraSug.Visible = False
+    mSugN = 0
+    mSugSel = 0
+End Sub
+
+Private Sub MoveSug(ByVal stepDir As Long)
+    If mSugN = 0 Then Exit Sub
+    mSugSel = mSugSel + stepDir
+    If mSugSel < 1 Then mSugSel = 1
+    If mSugSel > mSugN Then mSugSel = mSugN
+    ShowSugRows
+End Sub
+
+Private Function AlreadyIn(ByVal nm As String, ByVal addr As String) As Boolean
+    Dim i As Long
+    For i = 2 To mPN
+        If StrComp(mPName(i), nm, vbTextCompare) = 0 Then AlreadyIn = True
+        If addr <> "" Then
+            If StrComp(mPAddr(i), addr, vbTextCompare) = 0 Then AlreadyIn = True
+        End If
+        If AlreadyIn Then Exit Function
     Next
 End Function
 
@@ -943,104 +1203,169 @@ Private Function MyName() As String
     MyName = nm
 End Function
 
+' "Jane" from "Jane Smith" or "Smith, Jane" - or the whole name, if someone
+' else on the list has the same first name. "you" for you.
+Private Function ShortName(ByVal i As Long) As String
+    Dim j As Long, fn As String
+    If i = 1 Then
+        ShortName = "you"
+        Exit Function
+    End If
+    fn = FirstName(mPName(i))
+    For j = 2 To mPN
+        If j <> i Then
+            If StrComp(FirstName(mPName(j)), fn, vbTextCompare) = 0 Then
+                ShortName = mPName(i)
+                Exit Function
+            End If
+        End If
+    Next
+    ShortName = fn
+End Function
+
+Private Function FirstName(ByVal nm As String) As String
+    Dim k As Long
+    nm = Trim$(nm)
+    k = InStr(nm, ",")
+    If k > 0 Then
+        FirstName = Trim$(Split(Trim$(Mid$(nm, k + 1)) & " ", " ")(0))
+    Else
+        FirstName = Split(nm & " ", " ")(0)
+    End If
+    If FirstName = "" Then FirstName = nm
+End Function
+
 '==============================================================================
-' Days, calendars and the best times
+' Days and calendars
 '==============================================================================
 
-' The days shown: FT_DAYS working days from today, plus any later day typed
-' in Only at (up to a month ahead, as far as Outlook gives calendars).
+' The days looked at: FT_DAYS weekdays from today.
 Private Sub MakeDays()
-    Dim d As Date, n As Long, lastDay As Date, i As Long, typed As Boolean
-    For i = 1 To mWinN
-        If Int(mWinS(i)) > lastDay Then lastDay = Int(mWinS(i))
-    Next
-    If lastDay > Date + 29 Then lastDay = Date + 29
-    ReDim mDay(1 To 45)
+    Dim d As Date, n As Long
+    ReDim mDay(1 To FT_DAYS + 1)
     d = Date
-    Do
-        typed = False
-        For i = 1 To mWinN
-            If Int(mWinS(i)) = d Then typed = True
-        Next
-        If FT_WEEKENDS Or Weekday(d, vbMonday) <= 5 Or typed Then
+    Do While n < FT_DAYS
+        If FT_WEEKENDS Or Weekday(d, vbMonday) <= 5 Then
             n = n + 1
             mDay(n) = d
         End If
         d = d + 1
-        If n >= FT_DAYS And d > lastDay Then Exit Do
-        If d > Date + 29 Or n >= 45 Then Exit Do
     Loop
     mDayN = n
-    If mCurD > mDayN Then mCurD = mDayN
-    If mCurD < 1 Then mCurD = 1
 End Sub
 
-' Start of the half hour s on day d.
-Private Function SlotTime(ByVal d As Long, ByVal s As Long) As Date
-    SlotTime = mDay(d) + (FT_GRID_FROM * 60 + s * 30) / 1440#
+' Times are counted in quarter hours from midnight today (mBase).
+Private Function QTime(ByVal q As Long) As Date
+    QTime = mBase + q / 96#
 End Function
 
-' Puts the selection on the first time from now on that's in the hours.
-Private Sub FirstFreeSlot()
-    Dim d As Long, s As Long, m As Long
-    For d = 1 To mDayN
-        For s = 0 To mSlotN - 1
-            m = FT_GRID_FROM * 60 + s * 30
-            If SlotTime(d, s) >= Now And m >= mHourFrom And m + mLen <= mHourTo Then
-                mCurD = d
-                mCurS = s
-                Exit Sub
-            End If
-        Next
-    Next
-    mCurD = 1
-    mCurS = 0
-End Sub
+' The quarter hour of a time: roundUp = the next one, unless it's on one.
+Private Function QOf(ByVal t As Date, ByVal roundUp As Boolean) As Long
+    Dim x As Double
+    x = (CDbl(t) - CDbl(mBase)) * 96#
+    If roundUp Then QOf = -Int(-(x - 0.01)) Else QOf = Int(x + 0.01)
+End Function
 
-' Reads the calendars not read yet, one at a time, updating the grid as each
-' one comes in. People added meanwhile are read too.
+Private Function DayQ(ByVal d As Long) As Long
+    DayQ = CLng((mDay(d) - mBase) * 96)
+End Function
+
+Private Function DayOfQ(ByVal q As Long) As Date
+    DayOfQ = mBase + Int(q / 96)
+End Function
+
+' Person p in quarter hour q: 0 free, 1 tentative, 2 busy, 3 away (out of
+' office), 4 working elsewhere; -1 if it isn't known.
+Private Function Code(ByVal p As Long, ByVal q As Long) As Long
+    Dim u As Long
+    Code = -1
+    If mPState(p) <> 1 Then Exit Function
+    u = q - CLng((mPFBDay(p) - mBase) * 96) + 1
+    If u < 1 Or u > Len(mPFB(p)) Then Exit Function
+    Code = Asc(Mid$(mPFB(p), u, 1)) - 48
+    If Code < 0 Or Code > 4 Then Code = 0
+End Function
+
+Private Function IsBusyCode(ByVal c As Long) As Boolean
+    IsBusyCode = (c = 2 Or c = 3 Or (c = 1 And FT_TENTATIVE_BUSY))
+End Function
+
+' The worst moment for person p from quarter hour q0 up to q1 (busy beats
+' tentative beats free); -1 if some of it isn't known.
+Private Function WorstCode(ByVal p As Long, ByVal q0 As Long, ByVal q1 As Long) As Long
+    Dim q As Long, c As Long, w As Long
+    For q = q0 To q1 - 1
+        c = Code(p, q)
+        If c = -1 Then
+            WorstCode = -1
+            Exit Function
+        End If
+        If c = 4 Then c = 0                 ' working elsewhere is free
+        If c > w Then w = c
+    Next
+    WorstCode = w
+End Function
+
+' The needed people whose calendars are read.
+Private Function NeededPeople(need() As Long) As Long
+    Dim p As Long, n As Long
+    ReDim need(1 To mPN + 1)
+    For p = 1 To mPN
+        If mPRole(p) = "R" And mPState(p) = 1 Then
+            n = n + 1
+            need(n) = p
+        End If
+    Next
+    NeededPeople = n
+End Function
+
+' Reads the calendars not read yet, one at a time. The list is worked out
+' again as each one comes in, so times show from the start and firm up.
+' People added meanwhile are read too.
 Private Sub LoadCalendars()
     Dim p As Long, i As Long, gen As Long, fb As String, state As Long, done As Long, t0 As Single
-    Dim waiting As Long
+    Dim addr As String
     If mLoading Then Exit Sub
     mLoading = True
     t0 = Timer
     On Error GoTo Quit
     Do
         p = 0
-        waiting = 0
+        mWaiting = 0
         For i = 1 To mPN
             If mPState(i) = 0 Then
-                waiting = waiting + 1
+                mWaiting = mWaiting + 1
                 If p = 0 Then p = i
             End If
         Next
         If p = 0 Then Exit Do
-        gen = mGen
-        SetStatus "Checking calendars: " & mPName(p) & "  (" & waiting & " to go)..."
+        ShowHeader
         Me.Repaint
-        fb = FetchFB(mPAddr(p), state)
-        If gen = mGen And p <= mPN Then
-            mPFB(p) = fb
-            mPState(p) = state
-            mFBCache(LCase$(mPAddr(p))) = Array(fb, state, Timer, CDbl(Date))
-            done = done + 1
+        gen = mGen
+        addr = mPAddr(p)
+        fb = FetchFB(addr, state)
+        If gen = mGen Then
+            p = PersonIndex(addr)
+            If p > 0 Then
+                mPFB(p) = fb
+                mPFBDay(p) = Date
+                mPState(p) = state
+                mFBCache(LCase$(addr)) = Array(fb, state, Timer, CDbl(Date))
+                done = done + 1
+                BuildRows
+            End If
         End If
         DoEvents                            ' keys typed meanwhile are dealt with here
     Loop
 Quit:
     mLoading = False
+    mWaiting = 0
     If done > 0 Then NVS_Log "Find a Time: " & done & " calendars read in " & Format$(Elapsed(t0), "0.0") & " s"
-    Recompute
-    ' The best time is selected, so the people list shows who's free then.
-    If lstBest.ListCount > 0 And lstBest.ListIndex < 0 Then
-        If lstBest.List(0, 3) <> "" Then lstBest.ListIndex = 0
-    End If
+    BuildRows
 End Sub
 
 ' Someone's free/busy from Outlook: a character for every 15 minutes, from
-' midnight today for about a month (0 free, 1 tentative, 2 busy, 3 away,
-' 4 working elsewhere). state = 1 if it was read, 2 if it can't be.
+' midnight today for about a month. state = 1 if it was read, 2 if it can't be.
 Private Function FetchFB(ByVal addr As String, ByRef state As Long) As String
     Dim r As Outlook.Recipient, s As String
     state = 2
@@ -1061,365 +1386,469 @@ End Function
 Private Sub Reload()
     Dim i As Long
     For i = 1 To mPN
-        mPState(i) = 0
-        If mFBCache.Exists(LCase$(mPAddr(i))) Then mFBCache.Remove LCase$(mPAddr(i))
+        If mPState(i) <> 3 Then
+            mPState(i) = 0
+            If mFBCache.Exists(LCase$(mPAddr(i))) Then mFBCache.Remove LCase$(mPAddr(i))
+        End If
     Next
-    Recompute
+    BuildRows
     LoadCalendars
 End Sub
 
-' Person i during the meeting starting at (d, s): 0 free, 1 tentative,
-' 2 busy, 3 away - the worst moment counts.
-Private Function SpanStatus(ByVal i As Long, ByVal d As Long, ByVal s As Long) As Long
-    Dim u0 As Long, u As Long, nU As Long, c As String, worst As Long, v As Long
-    If mPState(i) <> 1 Then Exit Function
-    u0 = CLng((mDay(d) - Date) * 96) + (FT_GRID_FROM * 60 + s * 30) \ 15 + 1
-    nU = (mLen + 14) \ 15
-    For u = u0 To u0 + nU - 1
-        If u > Len(mPFB(i)) Then Exit For
-        c = Mid$(mPFB(i), u, 1)
-        Select Case c
-            Case "1": v = 1
-            Case "2": v = 2
-            Case "3": v = 3
-            Case Else: v = 0
-        End Select
-        If v > worst Then worst = v
-        If worst = 3 Then Exit For
-    Next
-    SpanStatus = worst
-End Function
+'==============================================================================
+' The times list
+'==============================================================================
 
-Private Function IsBusy(ByVal st As Long) As Boolean
-    IsBusy = (st >= 2) Or (st = 1 And chkTent.Value = True)
-End Function
+' Works out the rows of the times list and shows them, keeping the same
+' time selected if it's still there.
+Private Sub BuildRows()
+    Dim keepT As Date, had As Boolean, keepQ As Long, r As Long
+    If Not mBuilt Then Exit Sub
+    On Error GoTo Failed
+    If mRSel >= 1 And mRSel <= mRN Then
+        If Selectable(mRSel) Then
+            keepT = QTime(mRAt(mRSel))
+            had = True
+        End If
+    End If
+    mBase = Date
+    mNowQ = QOf(Now, True)
+    mLenQ = (mLen + 14) \ 15
+    If mLenQ < 1 Then mLenQ = 1
+    mRN = 0
+    ReDim mRKind(1 To 32)
+    ReDim mRA(1 To 32)
+    ReDim mRB(1 To 32)
+    ReDim mRAt(1 To 32)
+    ReDim mRWho(1 To 32)
+    ReDim mRBand(1 To 32)
+    mNote = ""
+    If mWinN > 0 Then TheirRows Else FreeRows
+    SetBands
 
-' Works out every time in the grid: who can't make it, whether it's a time
-' to suggest, then the best times, the grid's colors and the people's status.
-Private Sub Recompute()
-    Dim d As Long, s As Long, p As Long, m As Long, st As Date, req As Long, opt As Long
-    Dim anyPicked As Boolean, keys() As String, nk As Long, i As Long, j As Long, tmp As String
-    Dim parts() As String, loading As Boolean
+    mRSel = 0
+    If had Then
+        keepQ = QOf(keepT, False)
+        For r = 1 To mRN
+            If Selectable(r) And keepQ >= mRA(r) And keepQ < mRB(r) Then
+                mRSel = r
+                If keepQ <= LastStart(r) Then mRAt(r) = keepQ
+                Exit For
+            End If
+        Next
+    End If
+    If mRSel = 0 Then mRSel = FirstGood()
+Draw:
+    On Error Resume Next                    ' drawing never stops with an error
+    KeepRowVisible
+    ShowHeader
+    PaintTimes
+    PaintPeople
+    ShowAction
+    Exit Sub
+Failed:
+    ' Shown in the list rather than as a VBA error.
+    mRN = 0
+    mRSel = 0
+    mNote = "Couldn't work out the times: " & Err.Description
+    ReDim mRKind(1 To 1)
+    ReDim mRA(1 To 1)
+    ReDim mRB(1 To 1)
+    ReDim mRAt(1 To 1)
+    ReDim mRWho(1 To 1)
+    ReDim mRBand(1 To 1)
+    mRN = 1
+    mRKind(1) = K_NOTE
+    Resume Draw
+End Sub
 
-    If mDayN = 0 Or mPN = 0 Then Exit Sub
-    ReDim mReq(1 To mDayN, 0 To mSlotN - 1)
-    ReDim mOpt(1 To mDayN, 0 To mSlotN - 1)
-    ReDim mOK(1 To mDayN, 0 To mSlotN - 1)
-    ReDim mFits(1 To mDayN, 0 To mSlotN - 1)
-    ReDim keys(1 To mDayN * mSlotN)
-    anyPicked = (mWinN > 0) Or (mMarks.Count > 0)
-
+' Everyone's free times: on each day, the stretches when every needed person
+' is free for at least the meeting's length. A day with none gets the two
+' best stretches that suit all but one person.
+Private Sub FreeRows()
+    Dim d As Long, q0 As Long, q1 As Long, need() As Long, nNeed As Long, n As Long, i As Long
+    Dim rs() As Long, re() As Long
+    nNeed = NeededPeople(need)
     For d = 1 To mDayN
-        For s = 0 To mSlotN - 1
-            m = FT_GRID_FROM * 60 + s * 30
-            st = SlotTime(d, s)
-            mFits(d, s) = (st >= Now - 1 / 1440#) And (m + mLen <= FT_GRID_TO * 60)
-            If mFits(d, s) Then
-                req = 0
-                opt = 0
-                For p = 1 To mPN
-                    If mPRole(p) <> "X" And mPState(p) = 1 Then
-                        If IsBusy(SpanStatus(p, d, s)) Then
-                            If mPRole(p) = "O" Then opt = opt + 1 Else req = req + 1
-                        End If
+        q0 = DayQ(d) + (mHourFrom + 14) \ 15
+        q1 = DayQ(d) + mHourTo \ 15
+        If q0 < mNowQ Then q0 = mNowQ
+        If q1 - q0 >= mLenQ Then
+            n = FreeRuns(q0, q1, need, nNeed, 0, rs, re)
+            For i = 1 To n
+                AddRow K_FREE, rs(i), re(i), ""
+            Next
+            If n = 0 Then
+                AddRow K_NONE, q0, q0, ""
+                AllButRows q0, q1, need, nNeed
+            End If
+        End If
+    Next
+    If mRN = 0 Then
+        mNote = "No " & LengthText(mLen) & " times left in the hours looked in (" & HoursText() & ")."
+        AddRow K_NOTE, mNowQ, mNowQ, ""
+    End If
+End Sub
+
+' The stretches from quarter hour q0 up to q1 when all the needed people
+' (but person skip) are free, at least the meeting's length: starts in rs,
+' ends in re. Returns how many.
+Private Function FreeRuns(ByVal q0 As Long, ByVal q1 As Long, need() As Long, ByVal nNeed As Long, _
+                          ByVal skip As Long, rs() As Long, re() As Long) As Long
+    Dim q As Long, a As Long, n As Long, i As Long, isFree As Boolean
+    ReDim rs(1 To 16)
+    ReDim re(1 To 16)
+    a = -1
+    For q = q0 To q1
+        isFree = (q < q1)
+        If isFree Then
+            For i = 1 To nNeed
+                If need(i) <> skip Then
+                    If IsBusyCode(Code(need(i), q)) Then
+                        isFree = False
+                        Exit For
                     End If
-                Next
-                mReq(d, s) = req
-                mOpt(d, s) = opt
-                If anyPicked Then
-                    mOK(d, s) = mMarks.Exists(d & "|" & s) Or InWindows(st, st + mLen / 1440#)
-                Else
-                    mOK(d, s) = (m >= mHourFrom And m + mLen <= mHourTo)
                 End If
-                If mOK(d, s) Then
-                    nk = nk + 1
-                    keys(nk) = Format$(req, "00") & Format$(opt, "00") & Format$(st, "yyyymmddhhnn") & _
-                               "|" & d & "|" & s
+            Next
+        End If
+        If isFree Then
+            If a < 0 Then a = q
+        ElseIf a >= 0 Then
+            If q - a >= mLenQ Then
+                n = n + 1
+                If n > UBound(rs) Then
+                    ReDim Preserve rs(1 To 2 * n)
+                    ReDim Preserve re(1 To 2 * n)
                 End If
+                rs(n) = a
+                re(n) = q
+            End If
+            a = -1
+        End If
+    Next
+    FreeRuns = n
+End Function
+
+' A day when no time suits everyone: the two longest stretches that suit
+' all but one person (the sooner one if they're as long), in time order.
+Private Sub AllButRows(ByVal q0 As Long, ByVal q1 As Long, need() As Long, ByVal nNeed As Long)
+    Dim i As Long, j As Long, n As Long, rs() As Long, re() As Long, w As Long, k As Long
+    Dim cs(1 To 2) As Long, ce(1 To 2) As Long, cp(1 To 2) As Long, nc As Long
+    If nNeed < 2 Then Exit Sub
+    For i = 1 To nNeed
+        n = FreeRuns(q0, q1, need, nNeed, need(i), rs, re)
+        For j = 1 To n
+            If nc < 2 Then
+                nc = nc + 1
+                w = nc
+            Else
+                If Longer(cs(1), ce(1), cs(2), ce(2)) Then w = 2 Else w = 1     ' the weaker of the two
+                If Not Longer(rs(j), re(j), cs(w), ce(w)) Then w = 0
+            End If
+            If w > 0 Then
+                cs(w) = rs(j)
+                ce(w) = re(j)
+                cp(w) = need(i)
             End If
         Next
     Next
-
-    ' Fewest required people busy, then fewest optional, then soonest.
-    For i = 2 To nk
-        tmp = keys(i)
-        j = i - 1
-        Do While j >= 1
-            If keys(j) <= tmp Then Exit Do
-            keys(j + 1) = keys(j)
-            j = j - 1
-        Loop
-        keys(j + 1) = tmp
+    If nc = 2 Then
+        If cs(2) < cs(1) Then
+            k = cs(1): cs(1) = cs(2): cs(2) = k
+            k = ce(1): ce(1) = ce(2): ce(2) = k
+            k = cp(1): cp(1) = cp(2): cp(2) = k
+        End If
+    End If
+    For k = 1 To nc
+        AddRow K_ALLBUT, cs(k), ce(k), WhoLeftOut(cp(k), cs(k), ce(k))
     Next
-    mBestN = nk
-    If mBestN > BEST_ROWS Then mBestN = BEST_ROWS
-    ReDim mBestD(1 To mBestN + 1)
-    ReDim mBestS(1 To mBestN + 1)
-    For i = 1 To mBestN
-        parts = Split(keys(i), "|")
-        mBestD(i) = CLng(parts(1))
-        mBestS(i) = CLng(parts(2))
-    Next
-
-    For p = 1 To mPN
-        If mPState(p) = 0 Then loading = True
-    Next
-    FillBest loading
-    PaintGrid
-    ShowPeople
-    ShowSelected
 End Sub
 
-' True if a meeting from st to en sits inside one of the Only at times.
-Private Function InWindows(ByVal st As Date, ByVal en As Date) As Boolean
-    Dim i As Long
-    For i = 1 To mWinN
-        If st >= mWinS(i) - 1 / 86400# And en <= mWinE(i) + 1 / 86400# Then
-            InWindows = True
+' True if the stretch a1-b1 is longer than a2-b2 (or as long and sooner).
+Private Function Longer(ByVal a1 As Long, ByVal b1 As Long, ByVal a2 As Long, ByVal b2 As Long) As Boolean
+    Longer = (b1 - a1 > b2 - a2) Or (b1 - a1 = b2 - a2 And a1 < a2)
+End Function
+
+' "Jane", or "Jane (away)" if she's out of office then.
+Private Function WhoLeftOut(ByVal p As Long, ByVal a As Long, ByVal b As Long) As String
+    Dim q As Long
+    WhoLeftOut = ShortName(p)
+    For q = a To b - 1
+        If Code(p, q) = 3 Then
+            WhoLeftOut = WhoLeftOut & " (away)"
             Exit Function
         End If
     Next
 End Function
 
-' The Best times list: day, time, and who can't make it.
-Private Sub FillBest(ByVal loading As Boolean)
-    Dim arr() As String, i As Long, keepD As Long, keepS As Long, sel As Long
-    If lstBest.ListIndex >= 0 And lstBest.ListIndex < lstBest.ListCount Then
-        If lstBest.List(lstBest.ListIndex, 3) <> "" Then
-            keepD = CLng(Split(lstBest.List(lstBest.ListIndex, 3), "|")(0))
-            keepS = CLng(Split(lstBest.List(lstBest.ListIndex, 3), "|")(1))
-        End If
-    End If
-    mIgnore = True
-    If loading Then
-        ReDim arr(0 To 0, 0 To 3)
-        arr(0, 2) = "Checking calendars..."
-        lstBest.List = arr
-    ElseIf mBestN = 0 Then
-        ReDim arr(0 To 0, 0 To 3)
-        If mWinN > 0 Or mMarks.Count > 0 Then
-            arr(0, 2) = "None of those times fit (past, or too late)."
-        Else
-            arr(0, 2) = "No free times in these hours."
-        End If
-        lstBest.List = arr
-    Else
-        sel = -1
-        ReDim arr(0 To mBestN - 1, 0 To 3)
-        For i = 1 To mBestN
-            arr(i - 1, 0) = Format$(mDay(mBestD(i)), "ddd m/d")
-            arr(i - 1, 1) = ClockText(SlotTime(mBestD(i), mBestS(i)))
-            arr(i - 1, 2) = WhoText(mBestD(i), mBestS(i))
-            arr(i - 1, 3) = mBestD(i) & "|" & mBestS(i)
-            If mBestD(i) = keepD And mBestS(i) = keepS Then sel = i - 1
-        Next
-        lstBest.List = arr
-        If sel >= 0 Then lstBest.ListIndex = sel
-    End If
-    mIgnore = False
-End Sub
+' Their times, in order, each split where who's busy changes: "works", or
+' who can't make it.
+Private Sub TheirRows()
+    Dim i As Long, j As Long, m As Long, ws() As Date, we() As Date, t As Date
+    Dim qa As Long, qb As Long, q As Long, e As Long, key As String, need() As Long, nNeed As Long
 
-' "Everyone free", or who can't make it ("Bob, Ann busy; optional: Lee").
-Private Function WhoText(ByVal d As Long, ByVal s As Long) As String
-    Dim p As Long, req As String, opt As String, n As Long, nOK As Long
-    For p = 1 To mPN
-        If mPRole(p) <> "X" And mPState(p) = 1 Then
-            nOK = nOK + 1
-            If IsBusy(SpanStatus(p, d, s)) Then
-                If mPRole(p) = "O" Then
-                    opt = opt & ", " & FirstName(mPName(p))
-                Else
-                    req = req & ", " & FirstName(mPName(p))
-                End If
+    nNeed = NeededPeople(need)
+    ReDim ws(1 To mWinN)
+    ReDim we(1 To mWinN)
+    For i = 1 To mWinN                      ' in time order ...
+        t = mWinS(i)
+        j = m
+        Do While j >= 1
+            If ws(j) <= t Then Exit Do
+            ws(j + 1) = ws(j)
+            we(j + 1) = we(j)
+            j = j - 1
+        Loop
+        ws(j + 1) = t
+        we(j + 1) = mWinE(i)
+        m = m + 1
+    Next
+    j = 0                                   ' ... and overlapping ones joined
+    For i = 1 To m
+        If j > 0 Then
+            If ws(i) <= we(j) Then
+                If we(i) > we(j) Then we(j) = we(i)
+            Else
+                j = j + 1
+                ws(j) = ws(i)
+                we(j) = we(i)
+            End If
+        Else
+            j = 1
+            ws(1) = ws(i)
+            we(1) = we(i)
+        End If
+    Next
+    m = j
+
+    For i = 1 To m
+        qa = QOf(ws(i), True)
+        qb = QOf(we(i), False)
+        If qb > qa Then
+            If qb <= mNowQ Then
+                AddRow K_PAST, qa, qb, ""
+            Else
+                If qa < mNowQ Then qa = mNowQ
+                q = qa
+                Do While q < qb
+                    key = BusyKey(q, need, nNeed)
+                    e = q + 1
+                    Do While e < qb
+                        If BusyKey(e, need, nNeed) <> key Then Exit Do
+                        e = e + 1
+                    Loop
+                    If key = "" Then
+                        If e - q >= mLenQ Then AddRow K_WORKS, q, e, "" Else AddRow K_SHORT, q, e, ""
+                    ElseIf key = "?" Then
+                        AddRow K_FAR, q, e, ""
+                    Else
+                        AddRow K_BUSY, q, e, KeyNames(key)
+                    End If
+                    q = e
+                Loop
             End If
         End If
     Next
-    If req = "" And opt = "" Then
-        WhoText = "Everyone free" & IIf(nOK > 1, " (" & nOK & ")", "")
-    ElseIf req = "" Then
-        WhoText = "Required all free; optional busy: " & Mid$(opt, 3)
-    Else
-        WhoText = Mid$(req, 3) & " busy"
-        If opt <> "" Then WhoText = WhoText & "; optional: " & Mid$(opt, 3)
+    If mRN = 0 Then
+        mNote = "Those times are too short to check."
+        AddRow K_NOTE, mNowQ, mNowQ, ""
     End If
+End Sub
+
+' Who's busy in quarter hour q, as "3,5," (people's numbers); "?" if a
+' calendar isn't known then.
+Private Function BusyKey(ByVal q As Long, need() As Long, ByVal nNeed As Long) As String
+    Dim i As Long, c As Long
+    For i = 1 To nNeed
+        c = Code(need(i), q)
+        If c = -1 Then
+            BusyKey = "?"
+            Exit Function
+        End If
+        If IsBusyCode(c) Then BusyKey = BusyKey & need(i) & ","
+    Next
 End Function
 
-' "Jane" from "Jane Smith", or from "Smith, Jane".
-Private Function FirstName(ByVal nm As String) As String
-    Dim k As Long
-    nm = Trim$(nm)
-    k = InStr(nm, ",")
-    If k > 0 Then
-        FirstName = Trim$(Split(Trim$(Mid$(nm, k + 1)) & " ", " ")(0))
-    Else
-        FirstName = Split(nm & " ", " ")(0)
-    End If
-    If FirstName = "" Then FirstName = nm
+Private Function KeyNames(ByVal key As String) As String
+    Dim v As Variant
+    For Each v In Split(key, ",")
+        If CStr(v) <> "" Then
+            If KeyNames <> "" Then KeyNames = KeyNames & ", "
+            KeyNames = KeyNames & ShortName(CLng(v))
+        End If
+    Next
 End Function
 
-'------------------------------------------------------------------------------
-' The grid
-'------------------------------------------------------------------------------
+Private Sub AddRow(ByVal kind As Long, ByVal a As Long, ByVal b As Long, ByVal who As String)
+    Dim n As Long
+    mRN = mRN + 1
+    If mRN > UBound(mRKind) Then
+        n = 2 * mRN
+        ReDim Preserve mRKind(1 To n)
+        ReDim Preserve mRA(1 To n)
+        ReDim Preserve mRB(1 To n)
+        ReDim Preserve mRAt(1 To n)
+        ReDim Preserve mRWho(1 To n)
+        ReDim Preserve mRBand(1 To n)
+    End If
+    mRKind(mRN) = kind
+    mRA(mRN) = a
+    mRB(mRN) = b
+    mRWho(mRN) = who
+    mRAt(mRN) = a
+    If kind = K_FREE Or kind = K_ALLBUT Or kind = K_WORKS Then
+        ' On the hour or half hour, if the meeting still fits.
+        If a Mod 2 <> 0 And a + 1 + mLenQ <= b Then mRAt(mRN) = a + 1
+    End If
+End Sub
 
-Private Function HeatColor(ByVal req As Long, ByVal opt As Long) As Long
-    Select Case req
-        Case 0: If opt = 0 Then HeatColor = C_FREE Else HeatColor = C_FREE_OPT
-        Case 1: HeatColor = C_ONE
-        Case 2: HeatColor = C_TWO
-        Case Else: HeatColor = C_MANY
+' Every other day is shaded, so the days stand apart.
+Private Sub SetBands()
+    Dim r As Long, band As Boolean
+    For r = 1 To mRN
+        If r > 1 Then
+            If DayOfQ(mRA(r)) <> DayOfQ(mRA(r - 1)) Then band = Not band
+        End If
+        mRBand(r) = band
+    Next
+End Sub
+
+' Rows that are times (not notes): they can be picked and invited for.
+Private Function Selectable(ByVal r As Long) As Boolean
+    If r < 1 Or r > mRN Then Exit Function
+    Select Case mRKind(r)
+        Case K_FREE, K_ALLBUT, K_WORKS, K_BUSY, K_SHORT, K_FAR: Selectable = True
     End Select
 End Function
 
-' A paler version of a color: for times outside the hours, or not among the
-' times picked in Only at.
-Private Function Pale(ByVal col As Long) As Long
-    Dim r As Long, g As Long, b As Long
-    r = col And &HFF&
-    g = (col \ &H100&) And &HFF&
-    b = (col \ &H10000) And &HFF&
-    Pale = RGB(r + (255 - r) * 0.6, g + (255 - g) * 0.6, b + (255 - b) * 0.6)
-End Function
-
-Private Sub PaintGrid()
-    Dim c As Long, d As Long, s As Long, col As Long, cap As String, lbl As MSForms.Label
-    If mColsMade = 0 Or mDayN = 0 Then Exit Sub
-    On Error Resume Next
-    For c = 1 To mShowCols
-        d = mFirstCol + c - 1
-        If d <= mDayN Then
-            mDayLbl(c).Caption = Format$(mDay(d), "ddd") & vbCrLf & Format$(mDay(d), "m/d")
-            mDayLbl(c).Font.Bold = (mDay(d) = Date)
-            For s = 0 To mSlotN - 1
-                Set lbl = mCell(c, s)
-                cap = ""
-                If Not mFits(d, s) Then
-                    col = C_OFF
-                Else
-                    col = HeatColor(mReq(d, s), mOpt(d, s))
-                    If Not mOK(d, s) Then col = Pale(col)
-                    If mReq(d, s) > 0 Then cap = CStr(mReq(d, s))
-                End If
-                If lbl.BackColor <> col Then lbl.BackColor = col
-                If lbl.Caption <> cap Then lbl.Caption = cap
-                If mMarks.Exists(d & "|" & s) Then
-                    lbl.BorderStyle = 1
-                    lbl.BorderColor = C_MARK
-                ElseIf lbl.BorderStyle <> 0 Then
-                    lbl.BorderStyle = 0
-                End If
-                lbl.Visible = True
-            Next
-            mDayLbl(c).Visible = True
-        Else
-            mDayLbl(c).Visible = False
-            For s = 0 To mSlotN - 1
-                mCell(c, s).Visible = False
-            Next
+' The first time that suits everyone (or, if none does, the first time listed).
+Private Function FirstGood() As Long
+    Dim r As Long
+    For r = 1 To mRN
+        If mRKind(r) = K_FREE Or mRKind(r) = K_WORKS Then
+            FirstGood = r
+            Exit Function
         End If
     Next
-    btnPrev.Visible = (mDayN > mShowCols)
-    btnNext.Visible = (mDayN > mShowCols)
-    btnPrev.Enabled = (mFirstCol > 1)
-    btnNext.Enabled = (mFirstCol + mShowCols - 1 < mDayN)
-    PlaceCursor
-End Sub
+    FirstGood = NextSelectable(0, 1)
+End Function
 
-' The box around the selected time, as tall as the meeting.
-Private Sub PlaceCursor()
-    Dim c As Long, span As Long
-    c = mCurD - mFirstCol + 1
-    If c < 1 Or c > mShowCols Or mCurD > mDayN Then
-        lblCursor.Visible = False
-        Exit Sub
-    End If
-    span = (mLen + 29) \ 30
-    If mCurS + span > mSlotN Then span = mSlotN - mCurS
-    If span < 1 Then span = 1
-    lblCursor.Move mGX + (c - 1) * mCW - 1, mGY + mCurS * mCH - 1, mCW + 1, span * mCH + 1
-    lblCursor.Visible = True
-End Sub
+' The latest the meeting can start in row r.
+Private Function LastStart(ByVal r As Long) As Long
+    LastStart = mRB(r) - mLenQ
+    If LastStart < mRA(r) Then LastStart = mRA(r)
+End Function
 
-' Moves the selected time, paging the days so it stays on screen.
-Private Sub SetCursor(ByVal d As Long, ByVal s As Long)
-    If d < 1 Then d = 1
-    If d > mDayN Then d = mDayN
-    If s < 0 Then s = 0
-    If s > mSlotN - 1 Then s = mSlotN - 1
-    mCurD = d
-    mCurS = s
-    If mCurD < mFirstCol Then
-        mFirstCol = mCurD
-        PaintGrid
-    ElseIf mCurD > mFirstCol + mShowCols - 1 Then
-        mFirstCol = mCurD - mShowCols + 1
-        PaintGrid
-    Else
-        PlaceCursor
-    End If
-    ShowPeople
-    ShowSelected
-End Sub
+' The next row that can be picked after (stepDir = 1) or before (-1) row r;
+' 0 if there isn't one.
+Private Function NextSelectable(ByVal r As Long, ByVal stepDir As Long) As Long
+    r = r + stepDir
+    Do While r >= 1 And r <= mRN
+        If Selectable(r) Then
+            NextSelectable = r
+            Exit Function
+        End If
+        r = r + stepDir
+    Loop
+End Function
 
-Private Sub PageDays(ByVal stepDir As Long)
-    Dim f As Long
-    If mDayN <= mShowCols Then Exit Sub
-    f = mFirstCol + stepDir * mShowCols
-    If f > mDayN - mShowCols + 1 Then f = mDayN - mShowCols + 1
-    If f < 1 Then f = 1
-    If f = mFirstCol Then Exit Sub
-    mFirstCol = f
-    If mCurD < mFirstCol Or mCurD > mFirstCol + mShowCols - 1 Then mCurD = mFirstCol
-    PaintGrid
-    ShowPeople
-    ShowSelected
-End Sub
-
-' The status line: the selected time and who can't make it, plus any
-' calendars that can't be read.
-Private Sub ShowSelected()
-    Dim s As String, p As Long, unread As String
-    If mLoading Then Exit Sub
-    If mCurD >= 1 And mCurD <= mDayN Then
-        s = Format$(mDay(mCurD), "ddd m/d ") & ClockText(SlotTime(mCurD, mCurS)) & "-" & _
-            ClockText(SlotTime(mCurD, mCurS) + mLen / 1440#) & ":  " & WhoText(mCurD, mCurS)
-    End If
+' People busy during a meeting starting at quarter hour q: role "R" for the
+' needed ones, "O" for the optional ones.
+Private Function BusyDuring(ByVal q As Long, ByVal role As String) As String
+    Dim p As Long
     For p = 1 To mPN
-        If mPState(p) = 2 And mPRole(p) <> "X" Then unread = unread & ", " & FirstName(mPName(p))
+        If mPRole(p) = role And mPState(p) = 1 Then
+            If IsBusyCode(WorstCode(p, q, q + mLenQ)) Then
+                If BusyDuring <> "" Then BusyDuring = BusyDuring & ", "
+                BusyDuring = BusyDuring & ShortName(p)
+            End If
+        End If
     Next
-    If unread <> "" Then s = s & "     Can't see the calendar of: " & Mid$(unread, 3)
+End Function
+
+' The list's title, and the calendars it's still waiting for.
+Private Sub ShowHeader()
+    Dim s As String, p As Long, n As Long, x As Single
+    On Error Resume Next
+    If mWinN > 0 Then
+        s = "Their times: who's free"
+    Else
+        For p = 2 To mPN
+            If mPRole(p) = "R" And mPState(p) <> 3 Then n = n + 1
+        Next
+        If n = 0 Then s = "When you're free" Else s = "When everyone's free"
+    End If
+    If lblTimes.Caption <> s Then lblTimes.Caption = s
+    If mWaiting > 0 Then
+        s = "checking " & mWaiting & IIf(mWaiting = 1, " calendar...", " calendars...")
+    ElseIf mWinN > 0 Then
+        s = ""
+    Else
+        s = HoursText()
+    End If
+    If lblTimesInfo.Caption <> s Then lblTimesInfo.Caption = s
+    x = lblTimes.Left + lblTimes.Width + 8
+    lblTimesInfo.Move x, lblTimes.Top + 1, lblLen.Left - 4 - x, 11
+End Sub
+
+' The status line: what Enter does.
+Private Sub ShowAction()
+    Dim r As Long, s As String, st As Date, busy As String
+    r = mRSel
+    If Selectable(r) Then
+        st = QTime(mRAt(r))
+        s = "Enter: invite for " & Format$(st, "ddd m/d") & ", " & RangeText(st, st + mLen / 1440#)
+        busy = BusyDuring(mRAt(r), "R")
+        If mRKind(r) = K_FAR Then
+            s = s & "  - calendars can't be seen that far ahead"
+        ElseIf busy <> "" Then
+            s = s & "  - " & busy & " busy then"
+        Else
+            busy = BusyDuring(mRAt(r), "O")
+            If busy <> "" Then s = s & "  - " & busy & " (optional) busy then"
+        End If
+    ElseIf mNote <> "" Then
+        s = mNote
+    End If
     SetStatus s
 End Sub
 
-'------------------------------------------------------------------------------
-' The invite
-'------------------------------------------------------------------------------
+'==============================================================================
+' The invite, and copying the times
+'==============================================================================
 
-' Opens Outlook's meeting invite for the time (d, s) with everyone required
-' and optional on it. Nothing is sent.
-Private Sub CreateInvite(ByVal d As Long, ByVal s As Long)
-    Dim ap As Outlook.AppointmentItem, rc As Outlook.Recipient, p As Long, st As Date, n As Long
-    If d < 1 Or d > mDayN Or s < 0 Or s > mSlotN - 1 Then
+' Enter: the invite for the selected time.
+Private Sub InviteSelected()
+    If Not Selectable(mRSel) Then
         Beep
         Exit Sub
     End If
-    st = SlotTime(d, s)
-    If st < Now - 1 / 1440# Then
-        If MsgBox("That time has already passed. Open the invite anyway?", vbYesNo + vbQuestion + vbMsgBoxSetForeground, _
-                  "Find a Time") <> vbYes Then Exit Sub
-    End If
+    CreateInvite QTime(mRAt(mRSel))
+End Sub
+
+' Opens Outlook's meeting invite at st with everyone on it: needed people
+' required, optional people optional, and the people outside the firm too
+' if that's ticked. Nothing is sent.
+Private Sub CreateInvite(ByVal st As Date)
+    Dim ap As Outlook.AppointmentItem, rc As Outlook.Recipient, p As Long, n As Long
     On Error GoTo Fail
     Set ap = Application.CreateItem(olAppointmentItem)
     ap.MeetingStatus = olMeeting
-    ap.Subject = Trim$(txtSubject.Text)
+    ap.Subject = mTopic
     ap.Start = st
     ap.Duration = mLen
-    For p = 1 To mPN
-        If mPRole(p) = "R" Or mPRole(p) = "O" Then
-            Set rc = ap.Recipients.Add(mPAddr(p))
-            If mPRole(p) = "O" Then rc.Type = olOptional Else rc.Type = olRequired
-            n = n + 1
-        End If
+    For p = 2 To mPN
+        Set rc = ap.Recipients.Add(mPAddr(p))
+        If mPRole(p) = "O" Then rc.Type = olOptional Else rc.Type = olRequired
+        n = n + 1
     Next
+    If chkOut.Value = True Then
+        For p = 1 To mON
+            Set rc = ap.Recipients.Add(mOAddr(p))
+            If mORole(p) = "O" Then rc.Type = olOptional Else rc.Type = olRequired
+            n = n + 1
+        Next
+    End If
     ap.Recipients.ResolveAll
     NVS_Log "Find a Time: invite for " & Format$(st, "ddd m/d h:nn AM/PM") & " with " & n & " people"
     HideWindow
@@ -1429,10 +1858,144 @@ Fail:
     MsgBox "Couldn't open the invite: " & Err.Description, vbExclamation + vbMsgBoxSetForeground, "Find a Time"
 End Sub
 
-' The selected time: the one picked under Best times, or the grid's.
-Private Sub InviteSelected()
-    CreateInvite mCurD, mCurS
+' Ctrl+C: the free times as text for a reply, from the selected day on, a
+' line a day:   Tue 11/24: 9 - 10:30 AM, 2 - 4 PM
+Private Sub CopyTimes()
+    Dim r As Long, first As Long, s As String, ln As String, nDays As Long, lastDay As Date
+    Dim a As Long, b As Long, zone As String, d As Date
+    On Error GoTo Failed
+    first = mRSel
+    If first < 1 Then first = 1
+    Do While first > 1 And first <= mRN
+        If DayOfQ(mRA(first - 1)) <> DayOfQ(mRA(first)) Then Exit Do
+        first = first - 1
+    Loop
+    For r = first To mRN
+        If mRKind(r) = K_FREE Or mRKind(r) = K_WORKS Then
+            d = DayOfQ(mRA(r))
+            If d <> lastDay Then
+                If nDays = FT_COPY_DAYS Then Exit For
+                If ln <> "" Then s = s & ln & vbCrLf
+                ln = Format$(d, "ddd m/d") & ": "
+                nDays = nDays + 1
+                lastDay = d
+            Else
+                ln = ln & ", "
+            End If
+            ' On the half hour, if the meeting still fits.
+            a = mRA(r) + (mRA(r) Mod 2)
+            b = mRB(r) - (mRB(r) Mod 2)
+            If b - a < mLenQ Then
+                a = mRA(r)
+                b = mRB(r)
+            End If
+            ln = ln & RangeText(QTime(a), QTime(b))
+        End If
+    Next
+    If ln <> "" Then s = s & ln
+    If s = "" Then
+        Beep
+        If mWinN > 0 Then SetStatus "None of their times work, so there's nothing to copy." Else SetStatus "No free times to copy."
+        Exit Sub
+    End If
+    zone = ZoneShort()
+    If zone <> "" Then s = s & vbCrLf & "(all times " & zone & ")"
+    If PutOnClipboard(s) Then
+        SetStatus "Copied the free times for " & nDays & IIf(nDays = 1, " day", " days") & _
+                  " - paste them into your reply (Ctrl+V)."
+    Else
+        Beep
+        SetStatus "Couldn't copy: another program is using the clipboard. Try again."
+    End If
+    Exit Sub
+Failed:
+    SetStatus "Couldn't copy the times: " & Err.Description
 End Sub
+
+' Puts text on the clipboard.
+Private Function PutOnClipboard(ByVal s As String) As Boolean
+    Dim h As LongPtr, p As LongPtr, owner As LongPtr, i As Long, opened As Boolean
+    h = GlobalAlloc(&H42, (Len(s) + 1) * 2)        ' movable and zero-filled: the zero ends the text
+    If h = 0 Then Exit Function
+    p = GlobalLock(h)
+    If p = 0 Then
+        GlobalFree h
+        Exit Function
+    End If
+    If Len(s) > 0 Then CopyBytes p, StrPtr(s), Len(s) * 2
+    GlobalUnlock h
+    owner = mHwnd
+    If owner = 0 Then owner = GetForegroundWindow()
+    For i = 1 To 10                                ' another program may have it open for a moment
+        If OpenClipboard(owner) <> 0 Then
+            opened = True
+            Exit For
+        End If
+        DoEvents
+    Next
+    If Not opened Then
+        GlobalFree h
+        Exit Function
+    End If
+    EmptyClipboard
+    If SetClipboardData(13, h) = 0 Then GlobalFree h Else PutOnClipboard = True    ' 13: Unicode text
+    CloseClipboard
+End Function
+
+' Your time zone the way emails write it ("ET"); "" if it isn't one of these.
+Private Function ZoneShort() As String
+    Dim zid As String
+    On Error Resume Next
+    zid = Application.TimeZones.CurrentTimeZone.ID
+    On Error GoTo 0
+    Select Case zid
+        Case "Eastern Standard Time", "US Eastern Standard Time": ZoneShort = "ET"
+        Case "Central Standard Time": ZoneShort = "CT"
+        Case "Mountain Standard Time", "US Mountain Standard Time": ZoneShort = "MT"
+        Case "Pacific Standard Time": ZoneShort = "PT"
+        Case "GMT Standard Time": ZoneShort = "UK time"
+        Case "W. Europe Standard Time", "Romance Standard Time", "Central Europe Standard Time": ZoneShort = "CET"
+        Case "China Standard Time": ZoneShort = "HKT"
+        Case "Singapore Standard Time": ZoneShort = "SGT"
+        Case "Tokyo Standard Time": ZoneShort = "JST"
+        Case "India Standard Time": ZoneShort = "IST"
+    End Select
+End Function
+
+'------------------------------------------------------------------------------
+' Words for times
+'------------------------------------------------------------------------------
+
+' "Today", "Tomorrow" or "Wed 11/25".
+Private Function DayText(ByVal d As Date) As String
+    If d = Date Then
+        DayText = "Today"
+    ElseIf d = Date + 1 Then
+        DayText = "Tomorrow"
+    Else
+        DayText = Format$(d, "ddd m/d")
+    End If
+End Function
+
+' "2 - 4 PM", "11 AM - 12:30 PM".
+Private Function RangeText(ByVal t1 As Date, ByVal t2 As Date) As String
+    If (Hour(t1) < 12) = (Hour(t2) < 12) And Int(t1) = Int(t2) Then
+        RangeText = BareClock(t1) & " - " & ClockText(t2)
+    Else
+        RangeText = ClockText(t1) & " - " & ClockText(t2)
+    End If
+End Function
+
+' "2" or "2:30": a time without its AM / PM.
+Private Function BareClock(ByVal t As Date) As String
+    BareClock = ClockText(t)
+    BareClock = Left$(BareClock, Len(BareClock) - 3)
+End Function
+
+' The hours looked in, as "8 AM - 6 PM".
+Private Function HoursText() As String
+    HoursText = RangeText(Date + mHourFrom / 1440#, Date + mHourTo / 1440#)
+End Function
 
 Private Function LengthText(ByVal mins As Long) As String
     Select Case mins
@@ -1453,60 +2016,554 @@ Private Function ParseLength(ByVal s As String) As Long
 End Function
 
 '==============================================================================
-' Keys and the mouse
+' Drawing the lists
+'==============================================================================
+
+' The people: name, "optional", and what they're doing at the selected time.
+Private Sub PaintPeople()
+    Dim k As Long, i As Long, rowW As Single, back As Long, col As Long, tagW As Single
+    If mPSlotsMade = 0 Then Exit Sub
+    On Error Resume Next
+    mPainting = True
+    sbPeople.Visible = (mPN > mPSlots)
+    If sbPeople.Visible Then
+        sbPeople.Min = 1
+        sbPeople.Max = mPN - mPSlots + 1
+        sbPeople.LargeChange = IIf(mPSlots > 1, mPSlots - 1, 1)
+        sbPeople.SmallChange = 1
+        If sbPeople.Value <> mPTop Then sbPeople.Value = mPTop
+        rowW = sbPeople.Left
+    Else
+        rowW = fraPeople.InsideWidth
+    End If
+    mPainting = False
+    lblPeopleHit.Width = rowW
+    For k = 0 To mPSlots - 1
+        i = mPTop + k
+        If i <= mPN Then
+            If i = mPSel And mFocus = 1 Then
+                back = C_SEL
+            ElseIf i = mPHover Then
+                back = C_HOVER
+            Else
+                back = C_WHITE
+            End If
+            mPRowBack(k).Width = rowW
+            If mPRowBack(k).BackColor <> back Then mPRowBack(k).BackColor = back
+            mPRowBack(k).Visible = True
+            mPRowStat(k).Caption = PersonWord(i, col)
+            mPRowStat(k).ForeColor = col
+            mPRowStat(k).Left = rowW - 60
+            mPRowStat(k).Visible = True
+            If mPRole(i) = "O" Then tagW = 42 Else tagW = 0
+            mPRowTag(k).Left = rowW - 60 - tagW
+            mPRowTag(k).Visible = (tagW > 0)
+            mPRowName(k).Width = rowW - 66 - tagW
+            mPRowName(k).Caption = mPName(i)
+            mPRowName(k).Visible = True
+        Else
+            mPRowBack(k).Visible = False
+            mPRowName(k).Visible = False
+            mPRowTag(k).Visible = False
+            mPRowStat(k).Visible = False
+        End If
+    Next
+End Sub
+
+' What person i is doing at the selected time, and its color.
+Private Function PersonWord(ByVal i As Long, ByRef col As Long) As String
+    col = C_GRAY
+    Select Case mPState(i)
+        Case 0
+            PersonWord = "checking..."
+        Case 2, 3
+            PersonWord = "no calendar"
+        Case Else
+            If Not Selectable(mRSel) Then Exit Function
+            Select Case WorstCode(i, mRAt(mRSel), mRAt(mRSel) + mLenQ)
+                Case -1: PersonWord = "?"
+                Case 0: PersonWord = "free": col = C_GREEN
+                Case 1: PersonWord = "tentative": col = C_AMBER
+                Case 2: PersonWord = "busy": col = C_RED
+                Case 3: PersonWord = "away": col = C_PURPLE
+            End Select
+    End Select
+End Function
+
+' The times: the day (on its first row), the time, and who's busy.
+Private Sub PaintTimes()
+    Dim k As Long, r As Long, rowW As Single, back As Long, d As Date, newDay As Boolean
+    Dim tCap As String, tCol As Long, nCap As String, nCol As Long, wide As Boolean
+    If mTSlotsMade = 0 Then Exit Sub
+    On Error Resume Next
+    mPainting = True
+    sbTimes.Visible = (mRN > mTSlots)
+    If sbTimes.Visible Then
+        sbTimes.Min = 1
+        sbTimes.Max = mRN - mTSlots + 1
+        sbTimes.LargeChange = IIf(mTSlots > 1, mTSlots - 1, 1)
+        sbTimes.SmallChange = 1
+        If sbTimes.Value <> mRTop Then sbTimes.Value = mRTop
+        rowW = sbTimes.Left
+    Else
+        rowW = fraTimes.InsideWidth
+    End If
+    mPainting = False
+    lblTimesHit.Width = rowW
+    For k = 0 To mTSlots - 1
+        r = mRTop + k
+        If r <= mRN Then
+            If r = mRSel Then
+                If mFocus = 2 Then back = C_SEL Else back = C_SEL_OFF
+            ElseIf r = mTHover And Selectable(r) Then
+                back = C_HOVER
+            ElseIf mRBand(r) Then
+                back = C_BAND
+            Else
+                back = C_WHITE
+            End If
+            mTRowBack(k).Width = rowW
+            If mTRowBack(k).BackColor <> back Then mTRowBack(k).BackColor = back
+            mTRowBack(k).Visible = True
+
+            d = DayOfQ(mRA(r))
+            newDay = (k = 0)
+            If Not newDay Then newDay = (DayOfQ(mRA(r - 1)) <> d)
+            If newDay And mRKind(r) <> K_NOTE Then mTRowDay(k).Caption = DayText(d) Else mTRowDay(k).Caption = ""
+            mTRowDay(k).Font.Bold = True
+            mTRowDay(k).Visible = True
+
+            RowWords r, tCap, tCol, nCap, nCol, wide
+            mTRowTime(k).Caption = tCap
+            mTRowTime(k).ForeColor = tCol
+            If wide Then mTRowTime(k).Width = rowW - 80 Else mTRowTime(k).Width = 118
+            mTRowTime(k).Visible = True
+            mTRowNote(k).Caption = nCap
+            mTRowNote(k).ForeColor = nCol
+            mTRowNote(k).Width = rowW - 200
+            mTRowNote(k).Visible = Not wide
+        Else
+            mTRowBack(k).Visible = False
+            mTRowDay(k).Visible = False
+            mTRowTime(k).Visible = False
+            mTRowNote(k).Visible = False
+        End If
+    Next
+End Sub
+
+' The words of row r: its time (tCap, in color tCol) and a note after it
+' (nCap, nCol). wide = the time's words take the whole row.
+Private Sub RowWords(ByVal r As Long, ByRef tCap As String, ByRef tCol As Long, _
+                     ByRef nCap As String, ByRef nCol As Long, ByRef wide As Boolean)
+    Dim opt As String
+    tCap = RangeText(QTime(mRA(r)), QTime(mRB(r)))
+    tCol = C_TEXT
+    nCap = ""
+    nCol = C_GRAY
+    wide = False
+    Select Case mRKind(r)
+        Case K_FREE
+            opt = BusyDuring(mRAt(r), "O")
+            If opt <> "" Then
+                nCap = opt & " busy (optional)"
+                nCol = C_AMBER
+            End If
+        Case K_ALLBUT
+            nCap = "all but " & mRWho(r)
+            nCol = C_AMBER
+        Case K_NONE
+            tCap = "no time with everyone free"
+            tCol = C_GRAY
+            wide = True
+        Case K_WORKS
+            opt = BusyDuring(mRAt(r), "O")
+            If opt <> "" Then
+                nCap = "works, but " & opt & " (optional) busy"
+                nCol = C_AMBER
+            Else
+                nCap = "works"
+                nCol = C_GREEN
+            End If
+        Case K_BUSY
+            nCap = mRWho(r) & " busy"
+            nCol = C_RED
+        Case K_SHORT
+            nCap = "everyone free, but only for " & (mRB(r) - mRA(r)) * 15 & " min"
+            nCol = C_AMBER
+        Case K_PAST
+            tCol = C_GRAY
+            nCap = "already past"
+        Case K_FAR
+            nCap = "too far ahead to see calendars"
+        Case K_NOTE
+            tCap = mNote
+            tCol = C_GRAY
+            wide = True
+    End Select
+End Sub
+
+'==============================================================================
+' Moving around
+'==============================================================================
+
+' Puts the keyboard in a list: 1 the people, 2 the times.
+Private Sub FocusList(ByVal which As Long)
+    On Error Resume Next
+    HideSug
+    If which = 1 Then
+        If mPSel < 1 Then mPSel = 1
+        txtPeopleKeys.SetFocus
+    Else
+        txtTimesKeys.SetFocus
+    End If
+    SetFocusMark which
+End Sub
+
+' Which list has the keyboard, so its selection is drawn as in use.
+Private Sub SetFocusMark(ByVal which As Long)
+    If mFocus = which Then Exit Sub
+    mFocus = which
+    PaintPeople
+    PaintTimes
+End Sub
+
+Private Sub SelectRow(ByVal r As Long)
+    If Not Selectable(r) Then Exit Sub
+    mRSel = r
+    KeepRowVisible
+    PaintTimes
+    PaintPeople
+    ShowAction
+End Sub
+
+Private Sub MoveRow(ByVal stepDir As Long)
+    Dim r As Long
+    r = NextSelectable(mRSel, stepDir)
+    If r > 0 Then
+        SelectRow r
+    ElseIf stepDir < 0 And mRTop > 1 Then
+        mRTop = 1                           ' show the note at the top
+        PaintTimes
+    End If
+End Sub
+
+' Page Down: the first time of the next day. Page Up: the first time of this
+' day, or of the day before if already there.
+Private Sub MoveDay(ByVal stepDir As Long)
+    Dim r As Long, d As Date, f As Long
+    If Not Selectable(mRSel) Then
+        SelectRow NextSelectable(0, 1)
+        Exit Sub
+    End If
+    d = DayOfQ(mRA(mRSel))
+    If stepDir > 0 Then
+        r = mRSel
+        Do
+            r = NextSelectable(r, 1)
+            If r = 0 Then Exit Sub
+            If DayOfQ(mRA(r)) <> d Then Exit Do
+        Loop
+        SelectRow r
+    Else
+        f = FirstOfDay(mRSel)
+        If f <> mRSel Then
+            SelectRow f
+        Else
+            r = NextSelectable(f, -1)
+            If r > 0 Then SelectRow FirstOfDay(r)
+        End If
+    End If
+End Sub
+
+' The first time listed on row r's day.
+Private Function FirstOfDay(ByVal r As Long) As Long
+    Dim d As Date, k As Long
+    d = DayOfQ(mRA(r))
+    FirstOfDay = r
+    k = NextSelectable(r, -1)
+    Do While k > 0
+        If DayOfQ(mRA(k)) <> d Then Exit Do
+        FirstOfDay = k
+        k = NextSelectable(k, -1)
+    Loop
+End Function
+
+' Left / Right: the meeting starts 15 minutes earlier / later, inside the
+' selected time.
+Private Sub Nudge(ByVal stepDir As Long)
+    Dim q As Long
+    If Not Selectable(mRSel) Then Exit Sub
+    q = mRAt(mRSel) + stepDir
+    If q < mRA(mRSel) Or q > LastStart(mRSel) Then Exit Sub
+    mRAt(mRSel) = q
+    PaintTimes
+    PaintPeople
+    ShowAction
+End Sub
+
+Private Sub KeepRowVisible()
+    Dim want As Long
+    If mTSlots < 1 Then Exit Sub
+    If mRSel >= 1 And mRSel <= mRN Then
+        want = mRSel
+        If want > 1 Then
+            If mRKind(want - 1) = K_NONE Then want = want - 1     ' and the note above it
+        End If
+        If want < mRTop Then mRTop = want
+        If mRSel > mRTop + mTSlots - 1 Then mRTop = mRSel - mTSlots + 1
+    End If
+    If mRTop > mRN - mTSlots + 1 Then mRTop = mRN - mTSlots + 1
+    If mRTop < 1 Then mRTop = 1
+End Sub
+
+Private Sub ScrollTimes(ByVal delta As Long)
+    Dim t As Long
+    t = mRTop + delta
+    If t > mRN - mTSlots + 1 Then t = mRN - mTSlots + 1
+    If t < 1 Then t = 1
+    If t = mRTop Then Exit Sub
+    mRTop = t
+    PaintTimes
+End Sub
+
+Private Sub SelectPerson(ByVal i As Long)
+    If i > mPN Then i = mPN
+    If i < 1 Then i = 1
+    mPSel = i
+    KeepPersonVisible
+    PaintPeople
+End Sub
+
+Private Sub KeepPersonVisible()
+    If mPSlots < 1 Then Exit Sub
+    If mPSel >= 1 Then
+        If mPSel < mPTop Then mPTop = mPSel
+        If mPSel > mPTop + mPSlots - 1 Then mPTop = mPSel - mPSlots + 1
+    End If
+    If mPTop > mPN - mPSlots + 1 Then mPTop = mPN - mPSlots + 1
+    If mPTop < 1 Then mPTop = 1
+End Sub
+
+Private Sub ScrollPeople(ByVal delta As Long)
+    Dim t As Long
+    t = mPTop + delta
+    If t > mPN - mPSlots + 1 Then t = mPN - mPSlots + 1
+    If t < 1 Then t = 1
+    If t = mPTop Then Exit Sub
+    mPTop = t
+    PaintPeople
+End Sub
+
+'==============================================================================
+' Keys
 '==============================================================================
 
 ' Keys that work wherever you are in the window. True if it was one of them.
 Private Function CommonKey(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer) As Boolean
-    Select Case KeyCode
+    Dim k As Long
+    k = KeyCode
+    CommonKey = True
+    Select Case k
         Case vbKeyEscape
-            KeyCode = 0
-            CommonKey = True
-            If lstSuggest.Visible Then
-                lstSuggest.Visible = False
-            Else
-                HideWindow
-            End If
-        Case vbKeyReturn
-            If Shift = 2 Then                       ' Ctrl+Enter: invite for the selected time
-                KeyCode = 0
-                CommonKey = True
-                InviteSelected
-            End If
+            If fraSug.Visible Then HideSug Else HideWindow
         Case vbKeyF5
-            KeyCode = 0
-            CommonKey = True
             Reload
+        Case vbKeyReturn
+            If Shift = 2 Then InviteSelected Else CommonKey = False      ' Ctrl+Enter: the invite
         Case vbKeyK
-            If Shift = 2 Then                       ' Ctrl+K: address book
-                KeyCode = 0
-                CommonKey = True
-                PickFromAddressBook
-            End If
+            If Shift = 2 Then PickFromAddressBook Else CommonKey = False ' Ctrl+K: address book
+        Case vbKeyA, vbKeyP, vbKeyT, vbKeyW, vbKeyL
+            If Shift = 4 Then GoAlt k Else CommonKey = False             ' in case a label's Alt key didn't
+        Case Else
+            CommonKey = False
     End Select
+    If CommonKey Then KeyCode = 0
 End Function
 
-' A letter typed in a list or the grid starts adding a person.
+Private Sub GoAlt(ByVal key As Long)
+    On Error Resume Next
+    Select Case key
+        Case vbKeyA
+            txtAdd.SetFocus
+            SetFocusMark 0
+        Case vbKeyP
+            FocusList 1
+        Case vbKeyT
+            txtTheir.SetFocus
+            SetFocusMark 0
+        Case vbKeyW
+            FocusList 2
+        Case vbKeyL
+            cboLen.SetFocus
+            SetFocusMark 0
+    End Select
+End Sub
+
+' A letter typed in a list starts adding a person.
 Private Sub TypeToAdd(ByVal KeyAscii As MSForms.ReturnInteger)
-    If KeyAscii <= 32 Then Exit Sub
-    txtAdd.SetFocus
-    txtAdd.Text = txtAdd.Text & Chr$(KeyAscii)
-    txtAdd.SelStart = Len(txtAdd.Text)
+    Dim ch As String
+    If KeyAscii < 33 Then
+        KeyAscii = 0
+        Exit Sub
+    End If
+    ch = Chr$(KeyAscii)
     KeyAscii = 0
+    txtAdd.SetFocus
+    SetFocusMark 0
+    txtAdd.Text = txtAdd.Text & ch
+    txtAdd.SelStart = Len(txtAdd.Text)
 End Sub
 
-' Enter in a box: on to the best times.
-Private Sub GoBest()
-    lstSuggest.Visible = False
-    lstBest.SetFocus
-    If lstBest.ListIndex < 0 And lstBest.ListCount > 0 Then lstBest.ListIndex = 0
+'--- The times list -----------------------------------------------------------
+
+Private Sub txtTimesKeys_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 2
+    Select Case KeyCode
+        Case vbKeyUp: MoveRow -1
+        Case vbKeyDown: MoveRow 1
+        Case vbKeyPageUp: MoveDay -1
+        Case vbKeyPageDown: MoveDay 1
+        Case vbKeyHome: SelectRow NextSelectable(0, 1)
+        Case vbKeyEnd: SelectRow NextSelectable(mRN + 1, -1)
+        Case vbKeyLeft: Nudge -1
+        Case vbKeyRight: Nudge 1
+        Case vbKeyReturn: InviteSelected
+        Case vbKeyC
+            If Shift = 2 Then
+                CopyTimes
+            Else
+                CommonKey KeyCode, Shift
+                Exit Sub
+            End If
+        Case Else
+            CommonKey KeyCode, Shift
+            Exit Sub
+    End Select
+    KeyCode = 0
 End Sub
 
-Private Sub HideSuggest()
-    If Not lstSuggest Is Nothing Then lstSuggest.Visible = False
+Private Sub txtTimesKeys_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
+    TypeToAdd KeyAscii                      ' nothing is ever typed into this box
 End Sub
 
-'--- Add person ---------------------------------------------------------------
+Private Sub txtTimesKeys_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 2                          ' arrived here by Tab or Alt+W
+End Sub
+
+Private Sub lblTimesHit_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim r As Long
+    r = mRTop + Int(Y / ROW_H)
+    mClickOK = Selectable(r)
+    If mClickOK Then mRSel = r
+    FocusList 2
+    PaintTimes
+    PaintPeople
+    ShowAction
+End Sub
+
+Private Sub lblTimesHit_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
+    If mClickOK Then InviteSelected
+End Sub
+
+Private Sub lblTimesHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim r As Long
+    mOver = 2
+    r = mRTop + Int(Y / ROW_H)
+    If r > mRN Then r = 0
+    If r <> mTHover Then
+        mTHover = r
+        PaintTimes
+    End If
+    If mPHover <> 0 Then
+        mPHover = 0
+        PaintPeople
+    End If
+End Sub
+
+Private Sub sbTimes_Change()
+    If mPainting Then Exit Sub
+    If sbTimes.Value <> mRTop Then
+        mRTop = sbTimes.Value
+        PaintTimes
+    End If
+End Sub
+
+Private Sub sbTimes_Scroll()
+    sbTimes_Change
+End Sub
+
+'--- The people list ----------------------------------------------------------
+
+Private Sub txtPeopleKeys_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 1
+    Select Case KeyCode
+        Case vbKeyUp: SelectPerson mPSel - 1
+        Case vbKeyDown: SelectPerson mPSel + 1
+        Case vbKeyPageUp: SelectPerson mPSel - IIf(mPSlots > 1, mPSlots - 1, 1)
+        Case vbKeyPageDown: SelectPerson mPSel + IIf(mPSlots > 1, mPSlots - 1, 1)
+        Case vbKeyHome: SelectPerson 1
+        Case vbKeyEnd: SelectPerson mPN
+        Case vbKeySpace: ToggleRole mPSel
+        Case vbKeyDelete: RemovePerson mPSel
+        Case vbKeyReturn
+            If Shift = 2 Then InviteSelected Else FocusList 2
+        Case vbKeyRight: FocusList 2
+        Case Else
+            CommonKey KeyCode, Shift
+            Exit Sub
+    End Select
+    KeyCode = 0
+End Sub
+
+Private Sub txtPeopleKeys_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
+    TypeToAdd KeyAscii
+End Sub
+
+Private Sub txtPeopleKeys_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 1
+End Sub
+
+Private Sub lblPeopleHit_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim i As Long
+    i = mPTop + Int(Y / ROW_H)
+    If i >= 1 And i <= mPN Then mPSel = i
+    FocusList 1
+    PaintPeople
+End Sub
+
+' A double-click on a person: needed <-> optional.
+Private Sub lblPeopleHit_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
+    ToggleRole mPSel
+End Sub
+
+Private Sub lblPeopleHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim i As Long
+    mOver = 1
+    i = mPTop + Int(Y / ROW_H)
+    If i > mPN Then i = 0
+    If i <> mPHover Then
+        mPHover = i
+        PaintPeople
+    End If
+    If mTHover <> 0 Then
+        mTHover = 0
+        PaintTimes
+    End If
+End Sub
+
+Private Sub sbPeople_Change()
+    If mPainting Then Exit Sub
+    If sbPeople.Value <> mPTop Then
+        mPTop = sbPeople.Value
+        PaintPeople
+    End If
+End Sub
+
+Private Sub sbPeople_Scroll()
+    sbPeople_Change
+End Sub
+
+'--- Add someone --------------------------------------------------------------
 
 Private Sub txtAdd_Change()
     If mIgnore Then Exit Sub
@@ -1514,82 +2571,110 @@ Private Sub txtAdd_Change()
 End Sub
 
 Private Sub txtAdd_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
     Select Case KeyCode
         Case vbKeyDown
-            If lstSuggest.Visible Then
-                If lstSuggest.ListIndex < lstSuggest.ListCount - 1 Then lstSuggest.ListIndex = lstSuggest.ListIndex + 1
-                KeyCode = 0
-            End If
+            KeyCode = 0
+            If fraSug.Visible Then MoveSug 1 Else FocusList 1
+            Exit Sub
         Case vbKeyUp
-            If lstSuggest.Visible Then
-                If lstSuggest.ListIndex > 0 Then lstSuggest.ListIndex = lstSuggest.ListIndex - 1
+            If fraSug.Visible Then
                 KeyCode = 0
+                MoveSug -1
+                Exit Sub
             End If
         Case vbKeyReturn
-            If Shift <> 2 Then                      ' Enter = required, Shift+Enter = optional
+            If Shift <> 2 Then                      ' Enter = needed, Shift+Enter = optional
                 KeyCode = 0
                 If Shift = 1 Then AddFromBox "O" Else AddFromBox "R"
                 Exit Sub
             End If
         Case vbKeyEscape
-            If Not lstSuggest.Visible And txtAdd.Text <> "" Then
+            If Not fraSug.Visible And txtAdd.Text <> "" Then
                 KeyCode = 0
                 mIgnore = True
                 txtAdd.Text = ""
                 mIgnore = False
                 Exit Sub
             End If
+        Case vbKeyTab
+            HideSug
     End Select
     CommonKey KeyCode, Shift
+End Sub
+
+Private Sub txtAdd_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
+End Sub
+
+Private Sub txtAdd_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    SetFocusMark 0
 End Sub
 
 ' A click on a suggestion adds that person.
-Private Sub lstSuggest_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    If lstSuggest.ListIndex < 0 Then Exit Sub
-    AddFromBox "R"
+Private Sub lblSugHit_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim i As Long
+    i = 1 + Int(Y / ROW_H)
+    If i < 1 Or i > mSugN Then Exit Sub
+    mSugSel = i
+    If Shift = 1 Then AddFromBox "O" Else AddFromBox "R"
     txtAdd.SetFocus
 End Sub
 
-'--- People -------------------------------------------------------------------
+Private Sub lblSugHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim i As Long
+    i = 1 + Int(Y / ROW_H)
+    If i >= 1 And i <= mSugN And i <> mSugSel Then
+        mSugSel = i
+        ShowSugRows
+    End If
+End Sub
 
-Private Sub lstPeople_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    Select Case KeyCode
-        Case vbKeySpace
-            KeyCode = 0
-            CycleRole lstPeople.ListIndex + 1
-            Exit Sub
-        Case vbKeyDelete
-            KeyCode = 0
-            RemovePerson lstPeople.ListIndex + 1
-            Exit Sub
-        Case vbKeyReturn
-            If Shift <> 2 Then
-                KeyCode = 0
-                GoBest
-                Exit Sub
-            End If
-    End Select
+'--- Their times --------------------------------------------------------------
+
+Private Sub txtTheir_Change()
+    If mIgnore Then Exit Sub
+    ApplyTheir
+    BuildRows
+End Sub
+
+Private Sub txtTheir_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
+    HideSug
+    If KeyCode = vbKeyReturn And Shift = 0 Then     ' on to the times
+        KeyCode = 0
+        FocusList 2
+        Exit Sub
+    End If
     CommonKey KeyCode, Shift
 End Sub
 
-Private Sub lstPeople_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
-    TypeToAdd KeyAscii
+Private Sub txtTheir_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
 End Sub
 
-Private Sub lstPeople_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
-    CycleRole lstPeople.ListIndex + 1
+Private Sub txtTheir_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    SetFocusMark 0
+    HideSug
 End Sub
 
-Private Sub lstPeople_Enter()
-    HideSuggest
-    If lstPeople.ListIndex < 0 And lstPeople.ListCount > 0 Then lstPeople.ListIndex = 0
+' Reads the Their times box and shows how it was understood.
+Private Sub ApplyTheir()
+    Dim info As String
+    mWinN = ParseTimes(txtTheir.Text, mWinS, mWinE, info)
+    If Trim$(txtTheir.Text) = "" Then
+        lblTheirInfo.Caption = THEIR_HINT
+        lblTheirInfo.ForeColor = C_GRAY
+    ElseIf mWinN = 0 Then
+        lblTheirInfo.Caption = "Type a day and a time, like  tue 2-4" & IIf(info <> "", "   (" & info & ")", "")
+        lblTheirInfo.ForeColor = C_RED
+    Else
+        lblTheirInfo.Caption = "Read as:  " & info
+        lblTheirInfo.ForeColor = C_GRAY
+    End If
 End Sub
 
-Private Sub lstPeople_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    mPeopleOver = True
-End Sub
-
-'--- Length, hours, tentative, subject --------------------------------------
+'--- Length -------------------------------------------------------------------
 
 Private Sub cboLen_Change()
     Dim m As Long
@@ -1597,296 +2682,130 @@ Private Sub cboLen_Change()
     m = ParseLength(cboLen.Text)
     If m > 0 And m <> mLen Then
         mLen = m
-        If mWinN > 0 Then ApplyOnly             ' a single time in Only at lasts as long as the meeting
-        Recompute
+        If mWinN > 0 Then ApplyTheir        ' a single time typed lasts as long as the meeting
+        BuildRows
     End If
 End Sub
 
 Private Sub cboLen_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    If KeyCode = vbKeyReturn And Shift <> 2 Then
+    Dim k As Long
+    SetFocusMark 0
+    HideSug
+    k = KeyCode
+    If k = vbKeyReturn And Shift <> 2 Then
         KeyCode = 0
-        GoBest
+        FocusList 2
+        Exit Sub
+    End If
+    If (k = vbKeyUp Or k = vbKeyDown) And Shift = 0 Then
+        KeyCode = 0
+        If k = vbKeyDown Then StepLength 1 Else StepLength -1
         Exit Sub
     End If
     CommonKey KeyCode, Shift
 End Sub
 
-Private Sub cboLen_Enter()
-    HideSuggest
+Private Sub cboLen_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
 End Sub
 
-Private Sub txtHours_Change()
-    Dim a As Long, b As Long
+Private Sub cboLen_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    SetFocusMark 0
+    HideSug
+End Sub
+
+' Up / Down in Length: the next shorter / longer of 15, 30, 45 minutes,
+' 1 hour, 90 minutes, 2 hours.
+Private Sub StepLength(ByVal stepDir As Long)
+    Dim v As Variant, i As Long, m As Long
+    v = Array(15, 30, 45, 60, 90, 120)
+    m = mLen
+    If stepDir > 0 Then
+        For i = 0 To UBound(v)
+            If v(i) > mLen Then
+                m = v(i)
+                Exit For
+            End If
+        Next
+    Else
+        For i = UBound(v) To 0 Step -1
+            If v(i) < mLen Then
+                m = v(i)
+                Exit For
+            End If
+        Next
+    End If
+    If m <> mLen Then cboLen.Text = LengthText(m)       ' cboLen_Change does the rest
+End Sub
+
+'--- Also invite, and the buttons -------------------------------------------
+
+Private Sub chkOut_Click()
     If mIgnore Then Exit Sub
-    If ParseHours(txtHours.Text, a, b) Then
-        If a <> mHourFrom Or b <> mHourTo Then
-            mHourFrom = a
-            mHourTo = b
-            Recompute
-        End If
+    If chkOut.Value = True Then
+        SetStatus "The invite will include the " & mON & " outside the firm too."
+    Else
+        SetStatus "The invite won't include anyone outside the firm."
     End If
 End Sub
 
-Private Sub txtHours_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+Private Sub chkOut_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
     If KeyCode = vbKeyReturn And Shift <> 2 Then
         KeyCode = 0
-        GoBest
+        FocusList 2
         Exit Sub
     End If
     CommonKey KeyCode, Shift
 End Sub
 
-Private Sub txtHours_Enter()
-    HideSuggest
+Private Sub chkOut_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
 End Sub
 
-Private Sub chkTent_Click()
-    If mIgnore Or Not mBuilt Then Exit Sub
-    Recompute
+Private Sub chkOut_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    SetFocusMark 0
+    HideSug
 End Sub
 
-Private Sub chkTent_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    If KeyCode = vbKeyReturn And Shift <> 2 Then
-        KeyCode = 0
-        GoBest
-        Exit Sub
-    End If
-    CommonKey KeyCode, Shift
+Private Sub btnCopy_Click()
+    CopyTimes
+    If Me.ActiveControl Is btnCopy Then FocusList 2     ' Alt+C: back to the times
 End Sub
-
-Private Sub txtSubject_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    If KeyCode = vbKeyReturn And Shift <> 2 Then
-        KeyCode = 0
-        GoBest
-        Exit Sub
-    End If
-    CommonKey KeyCode, Shift
-End Sub
-
-Private Sub txtSubject_Enter()
-    HideSuggest
-End Sub
-
-'--- Only at ------------------------------------------------------------------
-
-Private Sub txtOnly_Change()
-    If mIgnore Then Exit Sub
-    ApplyOnly
-    Recompute
-End Sub
-
-Private Sub txtOnly_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    If KeyCode = vbKeyReturn And Shift <> 2 Then
-        KeyCode = 0
-        GoBest
-        Exit Sub
-    End If
-    CommonKey KeyCode, Shift
-End Sub
-
-Private Sub txtOnly_Enter()
-    HideSuggest
-End Sub
-
-' Reads the Only at box, shows how it was understood, and adds any later
-' days it names to the grid.
-Private Sub ApplyOnly()
-    Dim info As String, had As Long
-    mWinN = ParseTimes(txtOnly.Text, mWinS, mWinE, info)
-    If Trim$(txtOnly.Text) = "" Then
-        lblOnlyInfo.Caption = ONLY_HINT
-    ElseIf info = "" Then
-        lblOnlyInfo.Caption = "Type a day and a time, like  tue 2-4"
-    Else
-        lblOnlyInfo.Caption = info
-    End If
-    had = mDayN
-    MakeDays
-    If mDayN <> had Then Arrange
-End Sub
-
-'--- The grid -----------------------------------------------------------------
-
-Private Sub txtGrid_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    Dim d As Long, s As Long
-    d = mCurD
-    s = mCurS
-    Select Case KeyCode
-        Case vbKeyLeft: d = d - 1
-        Case vbKeyRight: d = d + 1
-        Case vbKeyUp: s = s - 1
-        Case vbKeyDown: s = s + 1
-        Case vbKeyHome: s = (mHourFrom - FT_GRID_FROM * 60) \ 30
-        Case vbKeyEnd: s = (mHourTo - mLen - FT_GRID_FROM * 60) \ 30
-        Case vbKeyPageUp
-            KeyCode = 0
-            PageDays -1
-            Exit Sub
-        Case vbKeyPageDown
-            KeyCode = 0
-            PageDays 1
-            Exit Sub
-        Case vbKeySpace
-            KeyCode = 0
-            ToggleMark mCurD, mCurS
-            Exit Sub
-        Case vbKeyDelete
-            KeyCode = 0
-            mMarks.RemoveAll
-            Recompute
-            Exit Sub
-        Case vbKeyReturn
-            KeyCode = 0
-            InviteSelected
-            Exit Sub
-        Case Else
-            CommonKey KeyCode, Shift
-            Exit Sub
-    End Select
-    KeyCode = 0
-    SetCursor d, s
-    If Shift = 1 Then                               ' Shift+arrows marks times as you go
-        mMarks(mCurD & "|" & mCurS) = True
-        Recompute
-    End If
-End Sub
-
-Private Sub txtGrid_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
-    If KeyAscii > 32 Then
-        TypeToAdd KeyAscii
-    Else
-        KeyAscii = 0
-    End If
-End Sub
-
-Private Sub txtGrid_Enter()
-    HideSuggest
-    lblCursor.BorderColor = RGB(0, 0, 0)
-    PlaceCursor
-End Sub
-
-Private Sub txtGrid_Exit(ByVal Cancel As MSForms.ReturnBoolean)
-    lblCursor.BorderColor = RGB(130, 130, 130)
-End Sub
-
-' Space in the grid, or a right-click: mark (or unmark) a time to look at.
-' Once any time is marked or typed in Only at, only those are suggested.
-Private Sub ToggleMark(ByVal d As Long, ByVal s As Long)
-    Dim k As String
-    k = d & "|" & s
-    If mMarks.Exists(k) Then mMarks.Remove k Else mMarks(k) = True
-    Recompute
-End Sub
-
-Private Function GridSpot(ByVal X As Single, ByVal Y As Single, ByRef d As Long, ByRef s As Long) As Boolean
-    If mCW <= 0 Or mCH <= 0 Or X < 0 Or Y < 0 Then Exit Function
-    d = mFirstCol + Int(X / mCW)
-    s = Int(Y / mCH)
-    GridSpot = (d >= 1 And d <= mDayN And d < mFirstCol + mShowCols And s >= 0 And s < mSlotN)
-End Function
-
-Private Sub lblGridHit_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    Dim d As Long, s As Long
-    If Not GridSpot(X, Y, d, s) Then Exit Sub
-    SetCursor d, s
-    If Button = 2 Then ToggleMark d, s
-    txtGrid.SetFocus
-End Sub
-
-Private Sub lblGridHit_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
-    InviteSelected
-End Sub
-
-' Hovering over a time shows who can't make it.
-Private Sub lblGridHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    Dim d As Long, s As Long
-    mPeopleOver = False
-    If mLoading Then Exit Sub
-    If Not GridSpot(X, Y, d, s) Then Exit Sub
-    If Not mFits(d, s) Then
-        SetStatus Format$(mDay(d), "ddd m/d ") & ClockText(SlotTime(d, s)) & ":  past, or too late in the day"
-    Else
-        SetStatus Format$(mDay(d), "ddd m/d ") & ClockText(SlotTime(d, s)) & "-" & _
-                  ClockText(SlotTime(d, s) + mLen / 1440#) & ":  " & WhoText(d, s)
-    End If
-End Sub
-
-'--- Best times ---------------------------------------------------------------
-
-Private Sub lstBest_Change()
-    Dim k As String
-    If mIgnore Then Exit Sub
-    If lstBest.ListIndex < 0 Then Exit Sub
-    k = lstBest.List(lstBest.ListIndex, 3)
-    If k = "" Then Exit Sub
-    SetCursor CLng(Split(k, "|")(0)), CLng(Split(k, "|")(1))
-End Sub
-
-Private Sub lstBest_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    If KeyCode = vbKeyReturn Then
-        KeyCode = 0
-        InviteFromBest
-        Exit Sub
-    End If
-    CommonKey KeyCode, Shift
-End Sub
-
-Private Sub lstBest_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
-    TypeToAdd KeyAscii
-End Sub
-
-Private Sub lstBest_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
-    InviteFromBest
-End Sub
-
-Private Sub lstBest_Enter()
-    HideSuggest
-    If lstBest.ListIndex < 0 And lstBest.ListCount > 0 Then lstBest.ListIndex = 0
-End Sub
-
-Private Sub lstBest_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    mPeopleOver = False
-End Sub
-
-Private Sub InviteFromBest()
-    If lstBest.ListIndex < 0 Then
-        Beep
-    ElseIf lstBest.List(lstBest.ListIndex, 3) = "" Then
-        Beep                                        ' "Checking calendars..." and the like
-    Else
-        lstBest_Change
-        InviteSelected
-    End If
-End Sub
-
-'--- Buttons ------------------------------------------------------------------
 
 Private Sub btnInvite_Click()
     InviteSelected
 End Sub
 
-Private Sub btnClose_Click()
-    HideWindow
+Private Sub btnCopy_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
+    CommonKey KeyCode, Shift
 End Sub
 
 Private Sub btnInvite_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    SetFocusMark 0
     CommonKey KeyCode, Shift
 End Sub
 
-Private Sub btnClose_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    CommonKey KeyCode, Shift
+Private Sub btnCopy_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    If Me.ActiveControl Is btnCopy Then SetFocusMark 0
 End Sub
 
-Private Sub btnPrev_Click()
-    PageDays -1
+Private Sub btnInvite_KeyUp(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    If Me.ActiveControl Is btnInvite Then SetFocusMark 0
 End Sub
 
-Private Sub btnNext_Click()
-    PageDays 1
-End Sub
-
+' The pointer is off the lists: nothing is lit up, and the wheel scrolls the times.
 Private Sub UserForm_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    mPeopleOver = False
+    mOver = 0
+    If mPHover <> 0 Then
+        mPHover = 0
+        PaintPeople
+    End If
+    If mTHover <> 0 Then
+        mTHover = 0
+        PaintTimes
+    End If
 End Sub
 
 '------------------------------------------------------------------------------
@@ -2120,12 +3039,12 @@ Private Function ParsePiece(ByVal pc As String, ByVal days As Collection, ByRef 
     ElseIf nT = 1 And aft Then
         sMin = Guess(tm(1), mer(1))
         eMin = mHourTo
-        If eMin <= sMin Then eMin = FT_GRID_TO * 60
+        If eMin <= sMin Then eMin = LATE_MIN
         hasTime = True
     ElseIf nT = 1 And bef Then
         sMin = mHourFrom
         eMin = Guess(tm(1), mer(1))
-        If eMin <= sMin Then sMin = FT_GRID_FROM * 60
+        If eMin <= sMin Then sMin = EARLY_MIN
         hasTime = True
     ElseIf nT = 1 Then
         sMin = Guess(tm(1), mer(1))                         ' a meeting starting then
@@ -2135,7 +3054,7 @@ Private Function ParsePiece(ByVal pc As String, ByVal days As Collection, ByRef 
         Select Case part
             Case "morning": sMin = mHourFrom: eMin = 12 * 60
             Case "afternoon": sMin = 12 * 60: eMin = mHourTo
-            Case "evening": sMin = 17 * 60: eMin = FT_GRID_TO * 60
+            Case "evening": sMin = 17 * 60: eMin = LATE_MIN
             Case Else: sMin = mHourFrom: eMin = mHourTo
         End Select
         If eMin <= sMin Then eMin = sMin + 60

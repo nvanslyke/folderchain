@@ -14,7 +14,7 @@
 | **Rename Attachments** (`NVS_RenameAttachments`) | One window listing every attachment on the email you're writing. Rename any of them, and the extensions are kept. |
 | **Meeting with Chain** (`NVS_ScheduleMeetingWithChain`) | Opens a **new** meeting invite with everyone on the chain. It isn't "Reply with Meeting", so the invite doesn't land in the chain. |
 | **Search** (`NVS_Search`) | Finds emails in every folder as you type, newest first, without relying on Windows' search index. Optional, in file 4. |
-| **Find a Time** (`NVS_FindTime`) | Everyone on the chain's calendars side by side, the times most of them can make listed first, and the meeting invite for the time you pick. Add people by typing their name, and paste in times someone gave you ("tue 2-4, wed 10-11 ET"). Works entirely from the keyboard. Optional, in file 5. |
+| **Find a Time** (`NVS_FindTime`) | When everyone on the chain is free, day by day, and the meeting invite for the time you pick. Only people inside your firm are shown, since theirs are the calendars Outlook can see. Add people by typing their name, paste in times someone sent you ("tue 2-4, wed 10-11 ET") to see which work, or copy your free times into a reply. Works entirely from the keyboard. Optional, in file 5. |
 | **Ribbon shortcuts** (`NVS_SetRibbonShortcuts`) | Run once: **Alt, X** opens your NVS_mail tab, and one more key presses a button (F File to Chain, M Move, U Undo, S Save, E Search...) instead of Outlook's Y1, Y2... |
 
 Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `NVS_ApplyRowColorsToView` (see [Colors](#3-color-coding)).
@@ -144,6 +144,8 @@ Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**
 1. In the VBA editor, right-click the `NVS_mail_Transcribe` module, choose **Remove...** and answer **No** to exporting.
 2. Choose **Tools > References** and untick **UIAutomationClient** (only Transcribe Call used it).
 3. Take the Transcribe Call button off your ribbon or Quick Access Toolbar.
+
+**Coming from the previous version:** replace file 5 (Find a Time), which is new and simpler, and file 4 (Search) if you use it. File 1 only changed in a comment, so it doesn't need pasting again.
 
 The Search window is now file 4 (`4_NVS_mail_Search.txt`) and Find a Time is file 5 (`5_NVS_mail_FindTime.txt`). Only the file names changed; the forms keep their names, so a Search or Find a Time form you've already added doesn't need redoing because of that.
 
@@ -344,7 +346,7 @@ The Search window has its own settings at the top of file 4:
 
 ### 7. Find a Time (optional)
 
-**Find a Time** (`NVS_FindTime`, file 5) shows the calendars of everyone on a chain side by side, lists the times most of them can make, and opens Outlook's meeting invite for the time you pick. Nothing is ever sent: you check the invite, add a Teams link if you want one, and press Send yourself.
+**Find a Time** (`NVS_FindTime`, file 5) answers one question: when is everyone on this chain free? It lists the free times of the people inside your firm, day by day, and opens Outlook's meeting invite for the one you pick. Nothing is ever sent: you check the invite, add a Teams link if you want one, and press Send yourself.
 
 **One-time setup**
 
@@ -356,13 +358,19 @@ The Search window has its own settings at the top of file 4:
 **The quickest way through it**
 
 1. Select (or open) an email in the chain and press **Alt, X, A**.
-2. Everyone on the chain is listed and their calendars are read. You're always included. People only ever on Cc are optional (`NVS_CC_AS_OPTIONAL`).
-3. **Best times** fills in, with the times the most people can make at the top, soonest first. Use **Up** / **Down** to look at them; the people list shows who's free, busy or tentative at the selected time.
-4. Press **Enter**. The meeting invite opens with everyone on it, the chain's subject, and that time and length.
+2. On the left are the chain's people from inside your firm, and their calendars are read. You're always included. People only ever on Cc are **optional** (`NVS_CC_AS_OPTIONAL`): they're invited, but the times don't wait for them.
+3. On the right, **When everyone's free** lists each weekday of the next two weeks with the stretches when everyone needed is free for the whole meeting, between 8 AM and 6 PM. The first one is selected.
+4. **Up** / **Down** pick a time, and **Enter** opens the invite with everyone on it, the chain's subject, and that time and length.
 
-**Adding people:** just type a name. Wherever you are in the window, typing a letter starts it. Suggestions come from people you've emailed recently, the ones you email most first. **Down** / **Up** pick one; **Enter** adds them as required, **Shift+Enter** as optional. Anyone else is looked up in the address book as you'd type them in an email ("Smith, Jane", an alias, or an email address). **Ctrl+K** opens the address book itself, with Required and Optional boxes.
+The line at the bottom always says what Enter will do, such as *Enter: invite for Tue 11/24, 2 - 2:30 PM*. The meeting starts at the beginning of the free stretch, on the hour or half hour. **Left** / **Right** move it 15 minutes at a time, and **Page Up** / **Page Down** jump a day. Next to each person is what they're doing at that time: free, busy, tentative or away (out of office).
 
-**Someone sent the times that work for them?** Press **Alt+O** and type them the way they wrote them. The line under the box shows how they were read, in your time. From then on, only those times are suggested.
+**A day when no time suits everyone** says *no time with everyone free*, with the two best times that suit all but one person under it, such as *9 - 10 AM  all but Jane*. To look for times without waiting for someone, make them optional: **Alt+P**, then **Space** on their name.
+
+**People outside your firm** aren't listed. Outlook can't see their calendars, so they'd only get in the way. Under the people there's a box, **Also invite the 3 outside the firm** (**Alt+O**), with their names; tick it to put them on the invite too. Inside your firm means anyone with your email domain, or anyone in your firm's address book. More domains can go in `FT_INSIDE_DOMAINS`.
+
+**Adding people:** just type a name. Wherever you are in the window, typing a letter starts it. Suggestions come from people you've emailed recently, the ones you email most first. **Down** / **Up** pick one; **Enter** adds them, **Shift+Enter** as optional. Anyone else is looked up in the address book as you'd type them in an email ("Smith, Jane", an alias, or an email address). **Ctrl+K** opens the address book itself, with Required and Optional boxes.
+
+**Someone sent the times that work for them?** Press **Alt+T** and type or paste them the way they wrote them. The line under the box shows how they were read, in your time. The list then shows just those times, each one marked **works** or with who's busy then, such as *2 - 3 PM  works* and *3 - 4 PM  Jane busy*. Clear the box to see every free time again.
 
 | You type | It looks at |
 |---|---|
@@ -370,53 +378,60 @@ The Search window has its own settings at the top of file 4:
 | `Tuesday 2-4, Wednesday 10-11:30` | both |
 | `tue 10-11, 2-4` | both, on Tuesday |
 | `mon or tue 2-4` | 2:00 to 4:00 PM on both days |
-| `thu after 3`, `fri before 11` | Thursday from 3 PM to the end of your hours; Friday from the start of your hours to 11 AM |
+| `thu after 3`, `fri before 11` | Thursday from 3 PM to 6 PM; Friday from 8 AM to 11 AM |
 | `tomorrow morning`, `wed afternoon` | the morning (until noon) or afternoon (from noon) |
 | `11/30 9am-12`, `dec 2 1:30-3`, `the 30th 4-5` | those dates |
 | `next tue 2-3` | Tuesday of next week |
 | `tue 2-4 PT`, `wed 10-11 ET`, `thu 3-5 London` | converted to your time, summer time included (ET, CT, MT, PT, London/UK, CET, HK, Singapore, Tokyo) |
-| `2-3` | 2:00 to 3:00 PM on every day shown |
+| `2-3` | 2:00 to 3:00 PM on every day |
 
-Times without am/pm are read as working hours: 7 to 11 are mornings, 12 is noon, 1 to 6 are afternoons. Clear the box to look at every time again.
+Times without am/pm are read as working hours: 7 to 11 are mornings, 12 is noon, 1 to 6 are afternoons.
 
-**The grid** (**Alt+G**) shows each working day for the next two weeks, from 7 AM to 8 PM. Each box is a meeting **starting** then, checked for its whole length. **Green** means everyone's free; **light green** means only optional people are busy; **yellow**, **orange** and **red** mean one, two, or three or more required people can't make it, with the number in the box. Pale boxes are outside your hours, or not among the times you picked. Grey means it's past or too late in the day. The black box is the selected time.
+**Sending your times to someone else?** Press **Ctrl+C** in the list, or click **Copy times**. It copies the free times of the next 5 days that have any, starting from the selected day, ready to paste into your reply:
 
-* **Arrows** move. **Home** / **End** go to the start and end of your hours. **Page Up** / **Page Down** show earlier or later days, if they don't all fit.
-* **Space** marks a time to look at, in blue (or right-click it). **Shift+arrows** mark as you go, and **Delete** clears the marks. Marked times work like Only at: only they're suggested.
-* **Enter** opens the invite for the selected time. Hover over a time to see who can't make it.
+```
+Tue 11/24: 9 - 10:30 AM, 2 - 4 PM
+Wed 11/25: 8 AM - 12 PM
+(all times ET)
+```
 
-**Other keys**
+**Keys**
 
 | Key | What it does |
 |---|---|
-| **Alt+P** | The people list. **Space** switches someone between required, optional and not invited ("off"). **Delete** removes them. |
-| **Alt+L** | Meeting length: pick one or type minutes (`45`) or hours (`1.5h`). |
-| **Alt+H** | The hours best times are looked for in, such as `8am-6pm` or `7:30-19`. |
-| **Alt+T** | Whether tentative meetings count as busy. |
-| **Alt+S** | The invite's subject. |
-| **Alt+B** | Best times. **Enter** in any box takes you here too. |
-| **Enter** / **Ctrl+Enter** | Open the invite for the selected time (Ctrl+Enter works from anywhere). |
+| **Up** / **Down**, **Page Up** / **Page Down**, **Home** / **End** | Pick a time; the day before or after; the first or last time |
+| **Left** / **Right** | Start the meeting 15 minutes earlier or later |
+| **Enter** | Open the invite for the selected time. **Ctrl+Enter** does it from anywhere in the window. |
+| **Ctrl+C** | Copy the free times, to paste into a reply |
+| Type a name | Add someone (see above). **Ctrl+K** opens the address book. |
+| **Alt+P** | The people. **Space** switches someone between needed and optional, **Delete** takes them off. |
+| **Alt+T** | Their times |
+| **Alt+L** | Meeting length: **Up** / **Down**, or type minutes (`45`) or hours (`1.5h`) |
+| **Alt+O** | Also invite the people outside the firm |
+| **Alt+W** | Back to the times |
 | **F5** | Read everyone's calendar again. Calendars are otherwise kept for 10 minutes. |
-| **Esc** | Close the window. It keeps everything for next time. |
+| **Esc** | Close the window. Open it again on the same chain within half an hour and it's as you left it. |
 
-The window stays open while you work in Outlook, so you can go back to the email to read someone's times. Running Find a Time on another chain starts over with that chain's people.
+The window stays open while you work in Outlook, so you can go back to the email to read someone's times. It looks the same on a laptop screen as on a big monitor; drag its edge to resize it, and it keeps the size you choose.
 
 **Limits**
 
-* **Calendars from your own company only.** People outside it show `?`: they're still invited, but they don't count toward the best times. If they sent their times, type them in Only at.
-* **Times start on the hour or half hour.**
-* **Up to a month ahead.** Outlook gives free/busy for about a month, so later days typed in Only at are left out.
+* **Calendars from inside your firm only.** Someone outside it that you add by name shows *no calendar*: they're invited, but the times don't wait for them. If they sent their times, paste them into Their times.
+* **Times are checked in 15-minute steps**, the way Outlook gives out free/busy.
+* **Up to a month ahead.** Outlook gives free/busy for about a month, so later times typed in Their times say *too far ahead to see calendars*.
 
 Find a Time's settings are at the top of file 5:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `FT_DAYS` | `10` | Working days shown, starting today. |
-| `FT_GRID_FROM` / `FT_GRID_TO` | `7` / `20` | Hours the grid covers (24-hour clock). |
-| `FT_HOURS` | `"8am-6pm"` | The hours to look in when it opens. |
-| `FT_LENGTH` | `30` | Meeting length when it first opens, in minutes. It then keeps the last one you used. |
+| `FT_DAYS` | `10` | Weekdays looked at, starting today. |
+| `FT_HOURS` | `"8am-6pm"` | The hours free times are looked for in. |
+| `FT_LENGTH` | `30` | Meeting length when it first opens, in minutes. It then keeps the last one you used, until Outlook closes. |
 | `FT_TENTATIVE_BUSY` | `True` | Tentative counts as busy. |
-| `FT_WEEKENDS` | `False` | Show Saturdays and Sundays too. |
+| `FT_WEEKENDS` | `False` | Look at Saturdays and Sundays too. |
+| `FT_INSIDE_DOMAINS` | `""` | More email domains that count as inside your firm, separated by commas, such as `"bank.com, banksecurities.com"`. |
+| `FT_INVITE_OUTSIDE` | `False` | Start with **Also invite the ... outside the firm** ticked. |
+| `FT_COPY_DAYS` | `5` | Days of free times that Ctrl+C copies. |
 
 ---
 
@@ -455,7 +470,14 @@ Folder colors, save locations, recent searches and the last folder you moved mai
 * **Outlook seems frozen and you can't click anything:** usually an NVS_mail or Outlook window is waiting for you somewhere you can't see it: behind Outlook, or on a screen that's no longer connected. Press **Alt+Tab** to find it, or **Esc** to cancel it. NVS_mail's windows and messages now always open in front of Outlook, on the screen you're working on.
   * If Outlook really does hang, open `%TEMP%\NVS_mail.log` in Notepad (type that into the File Explorer address bar). Its last lines show what NVS_mail was doing and how long each step took. Send them to whoever looks after your NVS_mail.
   * NVS_mail colors big batches of new mail a few at a time, so Outlook stays usable, and it gives up on a single giant chain after a few seconds. Outlook can put thousands of automated emails with the same subject into one chain.
-* **Outlook says it couldn't apply your rules:** this happened when an Outlook rule tried to move an email in the moment NVS_mail was coloring it. New mail is now colored 2 seconds after it arrives, once your rules have run. If you still see it, make `NVS_NEW_MAIL_DELAY` longer, such as `4`. If that doesn't help, turn off coloring new mail with `NVS_AUTO_COLOR = False`.
+* **"There was an error reading the rules from the server. The format of the server rules was not recognized." when Outlook starts:** this is an Outlook problem with one of your rules, not something NVS_mail does. Microsoft lists it as a known issue that appears after rules are changed in classic Outlook. Usually a single rule is to blame, often the one you made or changed most recently in classic Outlook. To find it without losing your other rules:
+  1. Open Outlook on the web (outlook.office.com) and go to **Settings > Mail > Rules**.
+  2. Take a screenshot of the newest rule (or the one you changed last), then delete it.
+  3. Close classic Outlook completely (check Task Manager) and start it again.
+  4. If the message is gone, make that rule again in **Outlook on the web**, not in classic Outlook. If it's still there, make the rule again and try the next one.
+
+  Rules marked *(client-only)* in classic Outlook's **Rules and Alerts** are good ones to try first. If none of that works, start your rules over: in classic Outlook choose **Home > Rules > Manage Rules & Alerts > Options > Export Rules** to keep a copy, close Outlook, press **Win+R**, type `outlook.exe /cleanrules` and press Enter. This deletes all your rules. Then make them again in Outlook on the web, or import the copy (**Options > Import Rules**). If the message comes back after importing, the bad rule came back with it, so delete the imported rules one at a time as above.
+* **Outlook says it couldn't apply your rules:** an Outlook rule tried to move an email in the moment NVS_mail was coloring it. New mail is colored 2 seconds after it arrives, once your rules have run. If you still see it, make `NVS_NEW_MAIL_DELAY` longer, such as `4`. If that doesn't help, turn off coloring new mail with `NVS_AUTO_COLOR = False`.
 * **The mouse wheel doesn't scroll, or the pointer acts oddly while an NVS_mail window is open:** set `NVS_MOUSE_WHEEL = False` at the top of file 1. The arrow and Page keys and the scroll bars still work.
 * **"An error occurred while attempting to verify the VBA project's signature" when Outlook starts:** the code changed after it was signed, which usually happens after pasting in an update. In the VBA editor choose **Debug > Compile**, then **Tools > Digital Signature > Remove**, then **Choose...** and pick your certificate. Click **Save**, close Outlook completely and start it again. If it keeps happening, make a new certificate with **Digital Certificate for VBA Projects** and sign with that one.
 * **The NVS_mail tab still shows Y1, Y2... after running `NVS_SetRibbonShortcuts`:** close Outlook completely (check Task Manager) and start it again. If the keys still aren't there, import the copy it saved on your Desktop: **File > Options > Customize Ribbon > Import/Export > Import customization file**, pick `NVS_mail ribbon (main window).exportedUI` and click **Yes**. The copy holds all your current ribbon and Quick Access Toolbar changes, plus the keys.
@@ -471,8 +493,9 @@ Folder colors, save locations, recent searches and the last folder you moved mai
 * **Search takes a long time to read your mail the first time:** set `SEARCH_MONTHS_BACK` at the top of file 4 to `24` (or fewer) so it reads only recent mail, or set `SEARCH_SENDER_ADDRESS` to `False`.
 * **Search shows an email in the wrong folder, or says it has moved:** press **F5** in the Search window to read your mail again.
 * **Find a Time says it "isn't set up yet":** add file 5. The form must be named exactly `NVS_mail_FindTime`.
-* **Someone shows `?` in Find a Time:** their calendar can't be read. They're outside your company, or their calendar isn't shared. They're still invited. If they sent their times, type them in **Only at**.
-* **The line under Only at says "Couldn't read" part of what you typed:** write it as a day and a time, like `tue 2-4`, `11/30 9-11` or `thu after 3`, with commas between separate times.
+* **Someone shows "no calendar" in Find a Time:** their calendar can't be read. They're outside your firm, or their calendar isn't shared. They're still invited, but the times don't wait for them. If they sent their times, paste them into **Their times**.
+* **Someone from your firm is missing from Find a Time, and is under "Also invite" instead:** their email domain isn't yours and they aren't in your firm's address book. Add the domain to `FT_INSIDE_DOMAINS`, or type their name to add them.
+* **The line under Their times says "Type a day and a time":** write it as a day and a time, like `tue 2-4`, `11/30 9-11` or `thu after 3`, with commas between separate times.
 
 ## Uninstall
 
