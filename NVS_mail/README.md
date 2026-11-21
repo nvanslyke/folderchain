@@ -13,9 +13,8 @@
 | **Folder Colors** (`NVS_ListFolderColors`) | Shows every colored folder with its color, and lets you add, change or remove colors. |
 | **Rename Attachments** (`NVS_RenameAttachments`) | One window listing every attachment on the email you're writing. Rename any of them, and the extensions are kept. |
 | **Meeting with Chain** (`NVS_ScheduleMeetingWithChain`) | Opens a **new** meeting invite with everyone on the chain. It isn't "Reply with Meeting", so the invite doesn't land in the chain. |
-| **Transcribe Call** (`NVS_TranscribeCall`) | Transcribes a Zoom call (or anything playing on your PC) into an Outlook email, using Windows 11's Live Captions. Optional, in file 4. |
-| **Search** (`NVS_Search`) | Finds emails in every folder as you type, newest first, without relying on Windows' search index. Optional, in file 5. |
-| **Find a Time** (`NVS_FindTime`) | Everyone on the chain's calendars side by side, the times most of them can make listed first, and the meeting invite for the time you pick. Add people by typing their name, and paste in times someone gave you ("tue 2-4, wed 10-11 ET"). Works entirely from the keyboard. Optional, in file 6. |
+| **Search** (`NVS_Search`) | Finds emails in every folder as you type, newest first, without relying on Windows' search index. Optional, in file 4. |
+| **Find a Time** (`NVS_FindTime`) | Everyone on the chain's calendars side by side, the times most of them can make listed first, and the meeting invite for the time you pick. Add people by typing their name, and paste in times someone gave you ("tue 2-4, wed 10-11 ET"). Works entirely from the keyboard. Optional, in file 5. |
 | **Ribbon shortcuts** (`NVS_SetRibbonShortcuts`) | Run once: **Alt, X** opens your NVS_mail tab, and one more key presses a button (F File to Chain, M Move, U Undo, S Save, E Search...) instead of Outlook's Y1, Y2... |
 
 Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `NVS_ApplyRowColorsToView` (see [Colors](#3-color-coding)).
@@ -24,18 +23,17 @@ Extras: `NVS_RemoveFolderColor`, `NVS_RecolorSelected`, `NVS_RecolorInbox` and `
 
 ## Setup (about 10 minutes, once)
 
-You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the 3 text files in this folder. Three more are optional: file 4 to transcribe calls, file 5 for the Search window and file 6 for Find a Time. Each file has a "HOW TO ADD" note at the top.
+You need classic Outlook for Windows (Microsoft 365, 2021, 2019 or 2016) and the 3 text files in this folder. Two more are optional: file 4 for the Search window and file 5 for Find a Time. Each file has a "HOW TO ADD" note at the top.
 
 | File | Where it goes in the VBA editor | Name (F4 > (Name)) |
 |---|---|---|
 | `1_NVS_mail.txt` | Insert > **Module** | `NVS_mail` |
 | `2_NVS_mail_Dialog.txt` | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_Dialog` (must match exactly) |
 | `3_ThisOutlookSession.txt` | Microsoft Outlook Objects > **ThisOutlookSession** (already there) | - |
-| `4_NVS_mail_Transcribe.txt` *(optional)* | **Tools > References** > tick **UIAutomationClient**, then Insert > **Module** | `NVS_mail_Transcribe` |
-| `5_NVS_mail_Search.txt` *(optional)* | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_Search` (must match exactly) |
-| `6_NVS_mail_FindTime.txt` *(optional)* | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_FindTime` (must match exactly) |
+| `4_NVS_mail_Search.txt` *(optional)* | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_Search` (must match exactly) |
+| `5_NVS_mail_FindTime.txt` *(optional)* | Insert > **UserForm**, then right-click it > **View Code** | `NVS_mail_FindTime` (must match exactly) |
 
-Three is the minimum. Outlook keeps code, forms and its own events in three separate places, and each needs its own paste. Files 4, 5 and 6 are optional extras; see [Transcribe a call](#6-transcribe-a-call-optional), [Search](#7-search-optional) and [Find a Time](#8-find-a-time-optional).
+Three is the minimum. Outlook keeps code, forms and its own events in three separate places, and each needs its own paste. Files 4 and 5 are optional extras; see [Search](#6-search-optional) and [Find a Time](#7-find-a-time-optional).
 
 **Already set up an earlier version?** See [Updating](#updating-to-a-new-version) instead.
 
@@ -98,11 +96,10 @@ If you edit the code later, sign it again (Tools > Digital Signature).
 | `NVS_ListFolderColors` | Folder Colors |
 | `NVS_SaveLocations` | Save Locations |
 | `NVS_RenameAttachments` | Rename Attachments (works while replying in the reading pane) |
-| `NVS_TranscribeCall` | Transcribe Call (only if you added file 4) |
-| `NVS_Search` | Search (needs file 5) |
-| `NVS_FindTime` | Find a Time (needs file 6) |
+| `NVS_Search` | Search (needs file 4) |
+| `NVS_FindTime` | Find a Time (needs file 5) |
 
-Only NVS_mail's own macros appear in that list (16, or 17 with file 4). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go on the tab too, or you can run them from **Alt+F8**. `NVS_SetRibbonShortcuts` doesn't need a button, since you run it once (below).
+Only NVS_mail's own macros appear in that list (16 of them). All the helper code is hidden. Select each one and use **Rename...** to give it a friendly name and an icon. The extras (`NVS_RecolorInbox`, ...) can go on the tab too, or you can run them from **Alt+F8**. `NVS_SetRibbonShortcuts` doesn't need a button, since you run it once (below).
 
 **Email window** (for Rename Attachments, and Save/Meeting on an open email): open any email or a new message, right-click its ribbon, choose **Customize the Ribbon**, and add the same macros to a new `NVS_mail` group on the **Message** tab. To get the Alt, X keys there too, use a new tab instead of a group, the same way as in the main window.
 
@@ -122,7 +119,7 @@ Then **Alt, X** opens the NVS_mail tab, and one more key presses a button. For e
 | **E** | Search (as in Ctrl+E, Outlook's own search key) | | **P** | Recolor Selected |
 | **I** | Meeting with Chain (I for invite) | | **B** | Recolor Inbox |
 | **R** | Rename Attachments | | **W** | Row colors (`NVS_ApplyRowColorsToView`) |
-| **T** | Transcribe Call | | **A** | Find a Time |
+| **A** | Find a Time | | | |
 
 * Any other macro on the tab, such as one of your own, gets a free letter from its name. Outlook's own commands that you add to the tab keep the keys Outlook gives them.
 * To use different keys, change `NVS_RIBBON_TAB_KEY` and `NVS_RIBBON_KEYS` at the top of file 1, then run it again.
@@ -142,11 +139,19 @@ Then **Alt, X** opens the NVS_mail tab, and one more key presses a button. For e
 
 Replace the code in each place: click in its code window, **Ctrl+A**, **Delete**, and paste the new file. For the form, right-click it and choose View Code first. Then **Debug > Compile**, sign again, save, and restart Outlook. Your folder colors and save locations are kept, since they're stored in the registry rather than in the code.
 
-**Coming from the version with the Alt, X ribbon keys:** replace files 1, 2 and 3, plus 4 and 5 if you use them. Add file 6 for Find a Time, put `NVS_FindTime` on your NVS_mail tab, and run `NVS_SetRibbonShortcuts` again so it gets its key (**A**).
+**Transcribe Call has been taken out.** If you added it, remove it before pasting in the new file 2, or the project won't compile:
 
-**Coming from the version with the Search window:** replace files 1, 2 and 3, plus 4 and 5 if you use them, and add file 6 if you want Find a Time. Then, for the Alt, X keys, run `NVS_SetRibbonShortcuts` (see [step 6](#6-add-the-nvs_mail-buttons-to-the-ribbon)).
+1. In the VBA editor, right-click the `NVS_mail_Transcribe` module, choose **Remove...** and answer **No** to exporting.
+2. Choose **Tools > References** and untick **UIAutomationClient** (only Transcribe Call used it).
+3. Take the Transcribe Call button off your ribbon or Quick Access Toolbar.
 
-**Coming from the version with the `NVS_mail_Dialog` form, but no Search window:** replace files 1 and 2, plus file 4 if you use it. Add file 5 if you want the Search window. ThisOutlookSession (file 3) hasn't changed.
+The Search window is now file 4 (`4_NVS_mail_Search.txt`) and Find a Time is file 5 (`5_NVS_mail_FindTime.txt`). Only the file names changed; the forms keep their names, so a Search or Find a Time form you've already added doesn't need redoing because of that.
+
+**Coming from the version with the Alt, X ribbon keys:** replace files 1, 2 and 3, plus file 4 (Search) if you use it. Add file 5 for Find a Time, put `NVS_FindTime` on your NVS_mail tab, and run `NVS_SetRibbonShortcuts` again so it gets its key (**A**).
+
+**Coming from the version with the Search window:** replace files 1, 2 and 3, plus file 4 (Search) if you use it, and add file 5 if you want Find a Time. Then, for the Alt, X keys, run `NVS_SetRibbonShortcuts` (see [step 6](#6-add-the-nvs_mail-buttons-to-the-ribbon)).
+
+**Coming from the version with the `NVS_mail_Dialog` form, but no Search window:** replace files 1, 2 and 3. Add file 4 if you want the Search window and file 5 for Find a Time.
 
 **Coming from the version with the `NVS_mail_FolderPicker` form:**
 
@@ -267,35 +272,9 @@ Select or open any email in the chain and click **Meeting with Chain**. A new me
 
 Nothing is sent. You pick the time, edit the attendees, and click Send yourself. Because the invite is created fresh rather than as a reply, it doesn't appear inside the email chain.
 
-### 6. Transcribe a call (optional)
+### 6. Search (optional)
 
-Outlook's own Dictate only listens to your microphone, so it can't hear the other people on a call. Windows 11's **Live Captions** can. It captions whatever plays on your PC, can include your microphone too, and does all of it on the PC itself. **Transcribe Call** (`NVS_TranscribeCall`, file 4) reads those captions and turns them into a transcript in Outlook.
-
-**One-time setup**
-
-1. Press **Windows key + Ctrl + L** to open Live Captions, and finish its setup. The first time, it downloads its speech files.
-2. In Live Captions, click the gear > **Preferences** and turn on **Include microphone audio**, so your own voice is captured too.
-3. In Zoom, go to **Settings > Audio** and leave **Speaker** on **Same as System**. Live Captions listens to your computer's sound output, so headphones are fine.
-4. Add file 4 in the VBA editor:
-   1. Choose **Tools > References**, tick **UIAutomationClient** (it's part of Windows) and click OK.
-   2. Choose **Insert > Module**, name it `NVS_mail_Transcribe`, and paste in `4_NVS_mail_Transcribe.txt`.
-   3. Choose **Debug > Compile**, then save.
-5. Add `NVS_TranscribeCall` to your ribbon group.
-
-**During a call**
-
-* Click **Transcribe Call**. It starts Live Captions if it isn't already running.
-* A small window shows the transcript as it builds up. You can keep working in Outlook and Zoom meanwhile.
-* Each paragraph starts with the time into the call, like `[12:40]`, and a pause starts a new paragraph. Live Captions doesn't know who is speaking, so there are no names.
-* The transcript is also saved as you go, in a `Call Transcripts` folder inside your base save folder (or in Documents if you haven't set one).
-* Click **Stop - put in email** when the call ends. The transcript goes into the email you were writing when you clicked Transcribe Call, or into a new email if you weren't writing one.
-* **Discard** throws the transcript away. Closing the window counts as Stop.
-
-Only transcribe a call when everyone on it is fine with that. Many places require everyone's consent, and your firm may have its own rules about recording calls.
-
-### 7. Search (optional)
-
-**Search** (`NVS_Search`, file 5) is a search window built to fix the usual complaints about Outlook's own search.
+**Search** (`NVS_Search`, file 4) is a search window built to fix the usual complaints about Outlook's own search.
 
 | Outlook's search | NVS_mail's Search |
 |---|---|
@@ -311,7 +290,7 @@ Only transcribe a call when everyone on it is fine with that. Many places requir
 **One-time setup**
 
 1. In the VBA editor, choose **Insert > UserForm**. Press **F4** and change **(Name)** to `NVS_mail_Search`.
-2. Right-click the form, choose **View Code**, delete anything there, and paste in `5_NVS_mail_Search.txt`. Leave the form blank.
+2. Right-click the form, choose **View Code**, delete anything there, and paste in `4_NVS_mail_Search.txt`. Leave the form blank.
 3. Choose **Debug > Compile**, then save.
 4. Add `NVS_Search` to your ribbon group. On the Quick Access Toolbar it also gets an Alt+number shortcut.
 
@@ -353,7 +332,7 @@ Only transcribe a call when everyone on it is fine with that. Many places requir
 * **Shared mailboxes.** One is included when you open Search while looking at one of its folders. Search text covers your own mailbox only.
 * **Sender addresses.** If reading them turns out to be slow on your PC, the window leaves them out and says so in its status line. Names still match.
 
-The Search window has its own settings at the top of file 5:
+The Search window has its own settings at the top of file 4:
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -363,14 +342,14 @@ The Search window has its own settings at the top of file 5:
 | `SEARCH_MAX_EMAILS` | `400000` | Stop reading beyond this many emails. |
 | `TEXT_MAX_RESULTS` | `3000` | Most message-text matches taken for one search. |
 
-### 8. Find a Time (optional)
+### 7. Find a Time (optional)
 
-**Find a Time** (`NVS_FindTime`, file 6) shows the calendars of everyone on a chain side by side, lists the times most of them can make, and opens Outlook's meeting invite for the time you pick. Nothing is ever sent: you check the invite, add a Teams link if you want one, and press Send yourself.
+**Find a Time** (`NVS_FindTime`, file 5) shows the calendars of everyone on a chain side by side, lists the times most of them can make, and opens Outlook's meeting invite for the time you pick. Nothing is ever sent: you check the invite, add a Teams link if you want one, and press Send yourself.
 
 **One-time setup**
 
 1. In the VBA editor, choose **Insert > UserForm**. Press **F4** and change **(Name)** to `NVS_mail_FindTime`.
-2. Right-click the form, choose **View Code**, delete anything there, and paste in `6_NVS_mail_FindTime.txt`. Leave the form blank.
+2. Right-click the form, choose **View Code**, delete anything there, and paste in `5_NVS_mail_FindTime.txt`. Leave the form blank.
 3. Choose **Debug > Compile**, sign again (Tools > Digital Signature) and save.
 4. Add `NVS_FindTime` to your NVS_mail tab, then run `NVS_SetRibbonShortcuts` again. **Alt, X, A** then opens it.
 
@@ -428,7 +407,7 @@ The window stays open while you work in Outlook, so you can go back to the email
 * **Times start on the hour or half hour.**
 * **Up to a month ahead.** Outlook gives free/busy for about a month, so later days typed in Only at are left out.
 
-Find a Time's settings are at the top of file 6:
+Find a Time's settings are at the top of file 5:
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -461,7 +440,7 @@ These are at the top of the **NVS_mail** module (file 1). Change the value, then
 | `NVS_MOUSE_WHEEL` | `True` | Let the mouse wheel scroll NVS_mail's windows. Outlook's VBA windows ignore the wheel on their own, so this uses a small Windows hook while one of them is open. |
 | `NVS_LOG` | `True` | Keep a short log of what NVS_mail does, in `NVS_mail.log` in your TEMP folder. |
 
-The Search window's and Find a Time's settings are in their own sections, [Search](#7-search-optional) and [Find a Time](#8-find-a-time-optional).
+The Search window's and Find a Time's settings are in their own sections, [Search](#6-search-optional) and [Find a Time](#7-find-a-time-optional).
 
 Folder colors, save locations, recent searches and the last folder you moved mail to are stored in the registry under `HKEY_CURRENT_USER\Software\VB and VBA Program Settings\NVS_mail`.
 
@@ -487,17 +466,13 @@ Folder colors, save locations, recent searches and the last folder you moved mai
 * **NVS_mail's windows look the wrong size, or blurry, on one of your screens:** this happens when two screens use different scaling. In Outlook, go to **File > Options > General**, set **When using multiple displays** to **Optimize for compatibility**, and restart Outlook. You can also resize the Move Items window by dragging its edge, and it keeps the size you choose.
 * **The Save As window doesn't appear:** NVS_mail falls back to Windows' simpler folder browser. Pick the folder there and click OK.
 
-* **Search says it "isn't set up yet":** add file 5. The form must be named exactly `NVS_mail_Search`.
-* **Search takes a long time to read your mail the first time:** set `SEARCH_MONTHS_BACK` at the top of file 5 to `24` (or fewer) so it reads only recent mail, or set `SEARCH_SENDER_ADDRESS` to `False`.
+* **Search says it "isn't set up yet":** add file 4. The form must be named exactly `NVS_mail_Search`.
+* **Search takes a long time to read your mail the first time:** set `SEARCH_MONTHS_BACK` at the top of file 4 to `24` (or fewer) so it reads only recent mail, or set `SEARCH_SENDER_ADDRESS` to `False`.
 * **Search shows an email in the wrong folder, or says it has moved:** press **F5** in the Search window to read your mail again.
-* **Find a Time says it "isn't set up yet":** add file 6. The form must be named exactly `NVS_mail_FindTime`.
+* **Find a Time says it "isn't set up yet":** add file 5. The form must be named exactly `NVS_mail_FindTime`.
 * **Someone shows `?` in Find a Time:** their calendar can't be read. They're outside your company, or their calendar isn't shared. They're still invited. If they sent their times, type them in **Only at**.
 * **The line under Only at says "Couldn't read" part of what you typed:** write it as a day and a time, like `tue 2-4`, `11/30 9-11` or `thu after 3`, with commas between separate times.
-* **Transcribe Call says Live Captions wasn't found:** it needs Windows 11 (version 22H2 or later). Your IT department may also have turned it off.
-* **"User-defined type not defined" on `CUIAutomation`:** in the VBA editor, tick **UIAutomationClient** under **Tools > References**.
-* **The transcript only has the other people's words:** turn on **Include microphone audio** in Live Captions' preferences.
-* **Nothing gets transcribed:** check that Live Captions itself shows captions while people talk, and that Zoom's speaker is set to **Same as System**.
 
 ## Uninstall
 
-In the VBA editor, right-click the `NVS_mail` module, the `NVS_mail_Dialog` form and (if you added them) `NVS_mail_Transcribe`, `NVS_mail_Search` and `NVS_mail_FindTime`, choose **Remove...** (answer No to exporting), and delete the NVS_mail code (everything with `nvs` or `NVS_` in it) from ThisOutlookSession. Delete the registry key above. Optionally delete the `Folder: ...` categories in **Categorize > All Categories**.
+In the VBA editor, right-click the `NVS_mail` module, the `NVS_mail_Dialog` form and (if you added them) `NVS_mail_Search` and `NVS_mail_FindTime`, choose **Remove...** (answer No to exporting), and delete the NVS_mail code (everything with `nvs` or `NVS_` in it) from ThisOutlookSession. Delete the registry key above. Optionally delete the `Folder: ...` categories in **Categorize > All Categories**.

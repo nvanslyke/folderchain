@@ -1,5 +1,5 @@
 '==============================================================================
-' NVS_mail - optional file 5:  NVS_mail_Search   (UserForm)
+' NVS_mail - optional file 4:  NVS_mail_Search   (UserForm)
 '
 ' A faster, more complete search window for Outlook mail.
 '

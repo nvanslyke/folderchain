@@ -14,9 +14,9 @@
 '   NVS_SetFolderColor            choose a color for a folder (and its subfolders)
 '   NVS_ListFolderColors          see, add, change or remove folder colors
 '   NVS_SaveLocations             where Save Email + Attachments opens, per folder
-'   NVS_Search                    search every folder at once (needs optional file 5)
+'   NVS_Search                    search every folder at once (needs optional file 4)
 '   NVS_FindTime                  everyone on the chain's calendars, best times
-'                                 first, invite for the time you pick (file 6)
+'                                 first, invite for the time you pick (file 5)
 ' Extras (ribbon, or run with Alt+F8):
 '   NVS_RemoveFolderColor  NVS_RecolorSelected  NVS_RecolorInbox
 '   NVS_ApplyRowColorsToView
@@ -77,7 +77,7 @@ Private Const NVS_RIBBON_TAB_KEY As String = "X"
 Private Const NVS_RIBBON_KEYS As String = _
     "NVS_FileToChainFolder=F;NVS_MoveToFolder=M;NVS_UndoMove=U;" & _
     "NVS_SaveEmailAndAttachments=S;NVS_Search=E;NVS_ScheduleMeetingWithChain=I;" & _
-    "NVS_RenameAttachments=R;NVS_TranscribeCall=T;NVS_SetFolderColor=C;" & _
+    "NVS_RenameAttachments=R;NVS_SetFolderColor=C;" & _
     "NVS_ListFolderColors=O;NVS_SaveLocations=L;NVS_RemoveFolderColor=D;" & _
     "NVS_RecolorSelected=P;NVS_RecolorInbox=B;NVS_ApplyRowColorsToView=W;NVS_FindTime=A"
 
@@ -252,7 +252,7 @@ Private mDlgSeen As Long
 Private mUndo As Collection
 Private mUndoStep As Collection
 
-' The Search window (optional file 5) and Find a Time (file 6), once opened
+' The Search window (optional file 4) and Find a Time (file 5), once opened
 Private mSearchForm As Object
 Private mFindForm As Object
 Private mMine As Object          ' your own addresses (for Find a Time)
@@ -1266,7 +1266,7 @@ End Function
 ' Search
 '==============================================================================
 
-' Opens the Search window (optional file 5): every folder at once, results as
+' Opens the Search window (optional file 4): every folder at once, results as
 ' you type, newest first. See README.md.
 Public Sub NVS_Search()
     If mSearchForm Is Nothing Then
@@ -1275,8 +1275,8 @@ Public Sub NVS_Search()
         On Error GoTo 0
         If mSearchForm Is Nothing Then
             MsgBox "The Search window isn't set up yet." & vbCrLf & vbCrLf & _
-                   "Add file 5: a UserForm named NVS_mail_Search, with the code from " & _
-                   "5_NVS_mail_Search.txt. See README.md.", vbInformation + vbMsgBoxSetForeground, NVS_APP
+                   "Add file 4: a UserForm named NVS_mail_Search, with the code from " & _
+                   "4_NVS_mail_Search.txt. See README.md.", vbInformation + vbMsgBoxSetForeground, NVS_APP
             Exit Sub
         End If
     End If
@@ -1835,7 +1835,7 @@ Private Sub RibbonWriteFile(ByVal path As String, ByVal s As String, ByVal wide 
 End Sub
 
 '==============================================================================
-' Find a Time (optional file 6)
+' Find a Time (optional file 5)
 '==============================================================================
 
 ' Opens Find a Time with everyone on the selected chain: their calendars side
@@ -1850,8 +1850,8 @@ Public Sub NVS_FindTime()
         On Error GoTo 0
         If mFindForm Is Nothing Then
             MsgBox "Find a Time isn't set up yet." & vbCrLf & vbCrLf & _
-                   "Add file 6: a UserForm named NVS_mail_FindTime, with the code from " & _
-                   "6_NVS_mail_FindTime.txt. See README.md.", vbInformation + vbMsgBoxSetForeground, NVS_APP
+                   "Add file 5: a UserForm named NVS_mail_FindTime, with the code from " & _
+                   "5_NVS_mail_FindTime.txt. See README.md.", vbInformation + vbMsgBoxSetForeground, NVS_APP
             Exit Sub
         End If
     End If

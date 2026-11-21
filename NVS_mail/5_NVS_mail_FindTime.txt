@@ -1,5 +1,5 @@
 '==============================================================================
-' NVS_mail - optional file 6:  NVS_mail_FindTime   (UserForm)
+' NVS_mail - optional file 5:  NVS_mail_FindTime   (UserForm)
 '
 ' Find a Time: everyone on an email chain, their calendars side by side, the
 ' times most of them can make listed first, and Outlook's meeting invite for
@@ -430,9 +430,9 @@ Private Sub Arrange()
     lblPeople.Move lx, 44, lw, 12
     y = h - keysH - 6 - 96                  ' top of the boxes under the people
     lstPeople.Move lx, 57, lw, y - 57 - 4
-    lstPeople.ColumnWidths = CStr(lw - 82) & " pt;32 pt;40 pt"
+    lstPeople.ColumnWidths = CStr(CLng(lw - 82)) & " pt;32 pt;40 pt"
     lstSuggest.Move lx, 40, lw, NAME_ROWS * 12 + 4
-    lstSuggest.ColumnWidths = CStr(lw - 6) & " pt;0 pt"
+    lstSuggest.ColumnWidths = CStr(CLng(lw - 6)) & " pt;0 pt"
     lblLen.Move lx, y + 3, 38, 12
     cboLen.Move lx + 40, y, 70, 18
     lblHours.Move lx + 116, y + 3, 32, 12
@@ -491,7 +491,7 @@ Private Sub Arrange()
 
     lblBest.Move tx + gw + 10, 46, bw, 12
     lstBest.Move tx + gw + 10, 60, bw, gridBottom - 60
-    lstBest.ColumnWidths = "54 pt;50 pt;" & CStr(bw - 112) & " pt;0 pt"
+    lstBest.ColumnWidths = "54 pt;50 pt;" & CStr(CLng(bw - 112)) & " pt;0 pt"
     lblStatus.Move tx, gridBottom + 5, tw, 12
     lblKeys.Move lx, h - keysH - 2, w - 16, keysH
     lstSuggest.ZOrder 0
@@ -1897,14 +1897,14 @@ End Sub
 ' 10-11:30 ET", "thursday after 3", "11/26 9am-12", "tomorrow morning",
 ' "mon or tue 2-4" - into windows of your local time. Returns how many there
 ' are; info says how they were read (and anything that couldn't be).
-Private Function ParseTimes(ByVal text As String, wS() As Date, wE() As Date, ByRef info As String) As Long
+Private Function ParseTimes(ByVal typed As String, wS() As Date, wE() As Date, ByRef info As String) As Long
     Dim s As String, pieces() As String, i As Long, j As Long, n As Long, k As Long, cnt As Long
     Dim pDays() As Collection, pHas() As Boolean, pS() As Long, pE() As Long, pZone() As String
     Dim pOK() As Boolean, zoneAll As String, useDays As Collection, d As Variant, z As String
     Dim st As Date, en As Date, bad As String, shown As String, converted As Boolean
 
     info = ""
-    s = NormalizeTimes(text)
+    s = NormalizeTimes(typed)
     If Trim$(Replace(s, ",", "")) = "" Then Exit Function
     pieces = Split(s, ",")
     n = UBound(pieces)
@@ -2383,10 +2383,10 @@ Done:
 End Function
 
 ' The Hours box: "8am-6pm", "8-6", "7:30-19". False if it isn't a time range.
-Private Function ParseHours(ByVal text As String, ByRef fromMin As Long, ByRef toMin As Long) As Boolean
+Private Function ParseHours(ByVal typed As String, ByRef fromMin As Long, ByRef toMin As Long) As Boolean
     Dim toks() As String, i As Long, tm(1 To 2) As Long, mer(1 To 2) As Long, n As Long
     Dim m As Long, mr As Long, s As String
-    s = Replace(NormalizeTimes(text), ",", " ")
+    s = Replace(NormalizeTimes(typed), ",", " ")
     s = Replace(s, "-", " - ")
     Do While InStr(s, "  ") > 0
         s = Replace(s, "  ", " ")
