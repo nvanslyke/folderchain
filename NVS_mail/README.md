@@ -439,7 +439,7 @@ These are at the top of the **NVS_mail** module (file 1). Change the value, then
 | `NVS_RIBBON_TAB_KEY` | `"X"` | The key after Alt that opens your NVS_mail tab. Run `NVS_SetRibbonShortcuts` again after changing it. `""` gives the tab Outlook's own keys back. |
 | `NVS_RIBBON_KEYS` | `"NVS_FileToChainFolder=F;..."` | The key for each button on that tab, one to three letters or digits each. Run `NVS_SetRibbonShortcuts` again after changing it. |
 | `NVS_MOUSE_WHEEL` | `True` | Let the mouse wheel scroll NVS_mail's windows. Outlook's VBA windows ignore the wheel on their own, so this uses a small Windows hook while one of them is open. |
-| `NVS_LOG` | `True` | Keep a short log of what NVS_mail does, in `NVS_mail.log` in your TEMP folder. |
+| `NVS_KEEP_LOG` | `True` | Keep a short log of what NVS_mail does, in `NVS_mail.log` in your TEMP folder. |
 
 The Search window's and Find a Time's settings are in their own sections, [Search](#6-search-optional) and [Find a Time](#7-find-a-time-optional).
 

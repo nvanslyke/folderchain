@@ -92,7 +92,7 @@ Private Const NVS_MOUSE_WHEEL As Boolean = True
 
 ' True = keep a short log of what NVS_mail does (NVS_mail.log in your TEMP
 ' folder). If Outlook ever hangs, its last lines show what was running.
-Private Const NVS_LOG As Boolean = True
+Private Const NVS_KEEP_LOG As Boolean = True
 
 '------------------------------------------------------------------------------
 ' Internals
@@ -3660,11 +3660,11 @@ End Sub
 
 ' Adds a line to NVS_mail.log in your TEMP folder: what NVS_mail did and how
 ' long it took. If Outlook ever hangs, the last lines show what was running.
-' NVS_LOG = False turns it off. The file starts again when it reaches 300 KB.
+' NVS_KEEP_LOG = False turns it off. The file starts again when it reaches 300 KB.
 Public Sub NVS_Log(ByVal msg As String)
     Static path As String
     Dim fn As Integer, size As Long, t As Single
-    If Not NVS_LOG Then Exit Sub
+    If Not NVS_KEEP_LOG Then Exit Sub
     On Error GoTo Done
     If path = "" Then path = Environ$("TEMP") & "\NVS_mail.log"
     size = 0
