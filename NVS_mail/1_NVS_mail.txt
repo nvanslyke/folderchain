@@ -44,6 +44,10 @@ Private Const NVS_EXCLUDED_FOLDER_NAMES As String = "Archive;Conversation Histor
 ' True = color mail automatically when it arrives, is sent, or is filed.
 Private Const NVS_AUTO_COLOR As Boolean = True
 
+' Seconds new mail waits before it's colored, so Outlook's own rules get to it
+' first. If Outlook says it couldn't apply your rules, make this longer.
+Private Const NVS_NEW_MAIL_DELAY As Single = 2
+
 ' How many days back "color existing mail" (after choosing a folder color)
 ' and Recolor Inbox look. 0 = all mail, however old.
 Private Const NVS_RECOLOR_DAYS_BACK As Long = 180
@@ -105,7 +109,6 @@ Private Const PR_CONVERSATION_ID As String = "http://schemas.microsoft.com/mapi/
 Private Const SEC_FOLDERS As String = "FolderCategory"   ' folder EntryID -> category
 Private Const SEC_SAVE As String = "SavePath"            ' folder EntryID -> Windows folder
 Private Const KEY_BASE As String = "BASE"                ' SEC_SAVE key for the base folder
-Private Const NVS_NEW_MAIL_DELAY As Single = 4           ' seconds before new mail is colored
 
 ' Windows Save As dialog (comdlg32)
 Private Const OFN_OVERWRITEPROMPT As Long = &H2
@@ -2085,10 +2088,11 @@ End Sub
 ' Events - called from ThisOutlookSession
 '==============================================================================
 
-' New mail arrived. It's colored a few seconds later rather than straight
-' away: Outlook's own rules get to the email first (saving an email while a
-' rule is moving it is what makes Outlook say it couldn't apply the rules),
-' and a burst of new mail is done a few at a time, so Outlook stays usable.
+' New mail arrived. It's colored NVS_NEW_MAIL_DELAY seconds later rather
+' than straight away: Outlook's own rules get to the email first (saving an
+' email while a rule is moving it is what makes Outlook say it couldn't apply
+' the rules), and a burst of new mail is done a few at a time, so Outlook
+' stays usable.
 Public Sub NVS_OnNewMail(ByVal entryIDs As String)
     Dim ids() As String, i As Long, n As Long
     On Error Resume Next
