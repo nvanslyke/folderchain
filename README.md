@@ -12,6 +12,7 @@ Macros for classic Outlook for Windows that treat an email chain as one unit:
 * Transcribe a Zoom call (or anything playing on your PC) into an email, using Windows 11's Live Captions
 * Search every folder at once as you type, with results that don't depend on Windows' search index
 * Keyboard shortcuts for the NVS_mail ribbon tab: Alt, X, then one letter per button
+* Find a time that works for everyone on a chain, from the keyboard: their calendars side by side, the best times first, and the invite for the one you pick
 
 Setup and usage: **[NVS_mail/README.md](NVS_mail/README.md)**
 

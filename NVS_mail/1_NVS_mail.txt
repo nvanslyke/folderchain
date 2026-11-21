@@ -15,6 +15,8 @@
 '   NVS_ListFolderColors          see, add, change or remove folder colors
 '   NVS_SaveLocations             where Save Email + Attachments opens, per folder
 '   NVS_Search                    search every folder at once (needs optional file 5)
+'   NVS_FindTime                  everyone on the chain's calendars, best times
+'                                 first, invite for the time you pick (file 6)
 ' Extras (ribbon, or run with Alt+F8):
 '   NVS_RemoveFolderColor  NVS_RecolorSelected  NVS_RecolorInbox
 '   NVS_ApplyRowColorsToView
@@ -77,7 +79,16 @@ Private Const NVS_RIBBON_KEYS As String = _
     "NVS_SaveEmailAndAttachments=S;NVS_Search=E;NVS_ScheduleMeetingWithChain=I;" & _
     "NVS_RenameAttachments=R;NVS_TranscribeCall=T;NVS_SetFolderColor=C;" & _
     "NVS_ListFolderColors=O;NVS_SaveLocations=L;NVS_RemoveFolderColor=D;" & _
-    "NVS_RecolorSelected=P;NVS_RecolorInbox=B;NVS_ApplyRowColorsToView=W"
+    "NVS_RecolorSelected=P;NVS_RecolorInbox=B;NVS_ApplyRowColorsToView=W;NVS_FindTime=A"
+
+' True = the mouse wheel scrolls the lists in NVS_mail's windows. Outlook's
+' VBA windows ignore the wheel on their own, so this uses a small Windows
+' hook while one of them is open. Set to False if it ever gives trouble.
+Private Const NVS_MOUSE_WHEEL As Boolean = True
+
+' True = keep a short log of what NVS_mail does (NVS_mail.log in your TEMP
+' folder). If Outlook ever hangs, its last lines show what was running.
+Private Const NVS_LOG As Boolean = True
 
 '------------------------------------------------------------------------------
 ' Internals
@@ -94,6 +105,7 @@ Private Const PR_CONVERSATION_ID As String = "http://schemas.microsoft.com/mapi/
 Private Const SEC_FOLDERS As String = "FolderCategory"   ' folder EntryID -> category
 Private Const SEC_SAVE As String = "SavePath"            ' folder EntryID -> Windows folder
 Private Const KEY_BASE As String = "BASE"                ' SEC_SAVE key for the base folder
+Private Const NVS_NEW_MAIL_DELAY As Single = 4           ' seconds before new mail is colored
 
 ' Windows Save As dialog (comdlg32)
 Private Const OFN_OVERWRITEPROMPT As Long = &H2
@@ -143,6 +155,68 @@ Private Const VK_SHIFT As Byte = &H10
 Private Const VK_TAB As Byte = &H9
 Private Const KEYEVENTF_KEYUP As Long = &H2
 
+' Placing windows (NVS_PlaceForm) and the mouse wheel (NVS_WheelOn)
+Private Type NvsRect
+    Left As Long
+    Top As Long
+    Right As Long
+    Bottom As Long
+End Type
+
+Private Type NvsMonitorInfo
+    cbSize As Long
+    rcMonitor As NvsRect
+    rcWork As NvsRect
+    dwFlags As Long
+End Type
+
+Private Declare PtrSafe Function FindWindowW Lib "user32" (ByVal lpClassName As LongPtr, _
+    ByVal lpWindowName As LongPtr) As LongPtr
+Private Declare PtrSafe Function IsWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
+Private Declare PtrSafe Function GetWindowRect Lib "user32" (ByVal hWnd As LongPtr, ByRef lpRect As NvsRect) As Long
+Private Declare PtrSafe Function SetWindowPos Lib "user32" (ByVal hWnd As LongPtr, ByVal hWndInsertAfter As LongPtr, _
+    ByVal X As Long, ByVal Y As Long, ByVal cx As Long, ByVal cy As Long, ByVal uFlags As Long) As Long
+Private Declare PtrSafe Function SetForegroundWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
+Private Declare PtrSafe Function MonitorFromWindow Lib "user32" (ByVal hWnd As LongPtr, ByVal dwFlags As Long) As LongPtr
+Private Declare PtrSafe Function GetMonitorInfoW Lib "user32" (ByVal hMonitor As LongPtr, _
+    ByRef lpmi As NvsMonitorInfo) As Long
+#If Win64 Then
+Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long) As LongPtr
+Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
+#Else
+Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" Alias "GetWindowLongW" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long) As LongPtr
+Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" Alias "SetWindowLongW" (ByVal hWnd As LongPtr, _
+    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
+#End If
+Private Declare PtrSafe Function SetWindowsHookExW Lib "user32" (ByVal idHook As Long, ByVal lpfn As LongPtr, _
+    ByVal hmod As LongPtr, ByVal dwThreadId As Long) As LongPtr
+Private Declare PtrSafe Function UnhookWindowsHookEx Lib "user32" (ByVal hhk As LongPtr) As Long
+Private Declare PtrSafe Function CallNextHookEx Lib "user32" (ByVal hhk As LongPtr, ByVal nCode As Long, _
+    ByVal wParam As LongPtr, ByVal lParam As LongPtr) As LongPtr
+Private Declare PtrSafe Function GetCurrentThreadId Lib "kernel32" () As Long
+Private Declare PtrSafe Sub RtlMoveMemory Lib "kernel32" (ByRef Destination As Any, ByVal Source As LongPtr, _
+    ByVal Length As LongPtr)
+Private Const GWL_STYLE As Long = -16
+Private Const WS_THICKFRAME As Long = &H40000
+Private Const WS_MAXIMIZEBOX As Long = &H10000
+Private Const SWP_NOSIZE As Long = &H1
+Private Const SWP_NOMOVE As Long = &H2
+Private Const SWP_NOZORDER As Long = &H4
+Private Const SWP_NOACTIVATE As Long = &H10
+Private Const SWP_FRAMECHANGED As Long = &H20
+Private Const HWND_TOP As Long = 0
+Private Const WH_MOUSE As Long = 7
+Private Const WM_MOUSEWHEEL As Long = &H20A
+' Where the wheel's turn (mouseData) sits in Windows' MOUSEHOOKSTRUCTEX.
+#If Win64 Then
+Private Const NVS_MOUSEDATA_AT As Long = 32
+#Else
+Private Const NVS_MOUSEDATA_AT As Long = 20
+#End If
+
 ' One email of a chain, read from Outlook's conversation table.
 Private Type NvsRow
     EntryID As String
@@ -178,8 +252,20 @@ Private mDlgSeen As Long
 Private mUndo As Collection
 Private mUndoStep As Collection
 
-' The Search window (optional file 5), once it has been opened
+' The Search window (optional file 5) and Find a Time (file 6), once opened
 Private mSearchForm As Object
+Private mFindForm As Object
+Private mMine As Object          ' your own addresses (for Find a Time)
+
+' New and filed mail waiting to be colored: Array(EntryID, StoreID, Timer, delay)
+Private mQueue As Collection
+Private mWorkTimer As LongPtr
+Private mInWork As Boolean
+
+' Mouse wheel: the windows that get it (newest last) and the hook
+Private mWheelForms As Collection
+Private mWheelHook As LongPtr
+Private mWheelRest As Long
 
 ' Folder list used by the Move Items window (NVS_mail_Dialog).
 Public gNVS_FolderCount As Long
@@ -203,12 +289,13 @@ Private mCacheKey As String
 ' Moves each selected email into the folder the rest of its chain is filed
 ' in. Emails whose chain isn't filed anywhere yet get the Move Items window.
 Public Sub NVS_FileToChainFolder()
-    Dim items As Collection, n As Long, i As Long
+    Dim items As Collection, n As Long, i As Long, t0 As Single
+    t0 = Timer
     ResetCaches
     Set items = NVS_GetSelectedItems()
     n = items.Count
     If n = 0 Then
-        MsgBox "Select one or more emails first.", vbInformation, NVS_APP
+        MsgBox "Select one or more emails first.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -270,21 +357,23 @@ Public Sub NVS_FileToChainFolder()
     EndUndoStep
     If Not lastTarget Is Nothing Then NVS_SetLastMoveFolder lastTarget
     RecolorMoved moved
+    NVS_Log "File to Chain: " & moved.Count & " emails moved and recolored in " & Format$(SecondsSince(t0), "0.00") & " s"
 
     If moved.Count = 0 And already > 0 And orphans.Count = 0 Then
         MsgBox IIf(already = 1, "This email is", "These emails are") & _
-               " already in the chain's folder.", vbInformation, NVS_APP
+               " already in the chain's folder.", vbInformation + vbMsgBoxSetForeground, NVS_APP
     End If
 End Sub
 
 ' Move Items window that opens on the folder the chain is filed in, instead
 ' of the last folder you used.
 Public Sub NVS_MoveToFolder()
-    Dim items As Collection, def As Outlook.Folder, hint As String, target As Outlook.Folder
+    Dim items As Collection, def As Outlook.Folder, hint As String, target As Outlook.Folder, t0 As Single
+    t0 = Timer
     ResetCaches
     Set items = NVS_GetSelectedItems()
     If items.Count = 0 Then
-        MsgBox "Select one or more emails first.", vbInformation, NVS_APP
+        MsgBox "Select one or more emails first.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -308,6 +397,7 @@ Public Sub NVS_MoveToFolder()
     EndUndoStep
     NVS_SetLastMoveFolder target
     RecolorMoved moved
+    NVS_Log "Move (chain): " & moved.Count & " emails moved and recolored in " & Format$(SecondsSince(t0), "0.00") & " s"
 End Sub
 
 Private Sub RecolorMoved(ByVal moved As Collection)
@@ -337,7 +427,8 @@ End Sub
 ' moves made with Outlook's own buttons.
 Public Sub NVS_UndoMove()
     Dim stp As Collection, i As Long, rec As Variant, it As Object, f As Object, m As Object
-    Dim moved As New Collection, missed As Long
+    Dim moved As New Collection, missed As Long, t0 As Single
+    t0 = Timer
 
     If mUndo Is Nothing Then GoTo NothingToUndo
     If mUndo.Count = 0 Then GoTo NothingToUndo
@@ -366,14 +457,15 @@ Public Sub NVS_UndoMove()
     Next
     gNVS_Busy = False
     RecolorMoved moved
+    NVS_Log "Undo Move: " & moved.Count & " emails moved and recolored in " & Format$(SecondsSince(t0), "0.00") & " s"
     If missed > 0 Then
         MsgBox missed & IIf(missed = 1, " email", " emails") & " couldn't be put back - " & _
                IIf(missed = 1, "it may have been", "they may have been") & " moved or deleted since.", _
-               vbInformation, NVS_APP
+               vbInformation + vbMsgBoxSetForeground, NVS_APP
     End If
     Exit Sub
 NothingToUndo:
-    MsgBox "There's no NVS_mail move to undo.", vbInformation, NVS_APP
+    MsgBox "There's no NVS_mail move to undo.", vbInformation + vbMsgBoxSetForeground, NVS_APP
 End Sub
 
 Private Sub MoveAll(ByVal items As Collection, ByVal target As Outlook.Folder, ByVal moved As Collection)
@@ -486,7 +578,7 @@ Public Sub NVS_ListFolderColors()
                     If act = "remove" Then
                         RemoveFolderColorByKey keys(sel), f, True
                     ElseIf f Is Nothing Then
-                        MsgBox "That folder no longer exists. Use Remove to clear its color.", vbExclamation, NVS_APP
+                        MsgBox "That folder no longer exists. Use Remove to clear its color.", vbExclamation + vbMsgBoxSetForeground, NVS_APP
                     Else
                         EditFolderColor f
                     End If
@@ -513,7 +605,7 @@ Private Sub EditFolderColor(ByVal f As Outlook.Folder)
     If Not NVS_IsFilingFolder(f) Then
         MsgBox "'" & f.Name & "' is a system folder (Inbox, Sent Items, Archive...)." & vbCrLf & _
                "Colors follow the folder a chain is filed in, so pick a folder you file mail into.", _
-               vbExclamation, NVS_APP
+               vbExclamation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -545,12 +637,12 @@ Private Sub RemoveFolderColorByKey(ByVal key As String, ByVal f As Outlook.Folde
     If f Is Nothing Then nm = "this folder" Else nm = "'" & f.Name & "'"
     If cat = "" Then
         MsgBox nm & " doesn't have a color of its own. If its emails show a color, it comes " & _
-               "from a folder above it.", vbInformation, NVS_APP
+               "from a folder above it.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
     If confirm Then
         If MsgBox("Stop coloring " & nm & "?" & vbCrLf & vbCrLf & "The '" & cat & _
-                  "' color is taken off its email chains.", vbOKCancel + vbQuestion, NVS_APP) <> vbOK Then Exit Sub
+                  "' color is taken off its email chains.", vbOKCancel + vbQuestion + vbMsgBoxSetForeground, NVS_APP) <> vbOK Then Exit Sub
     End If
 
     On Error Resume Next
@@ -565,7 +657,7 @@ Public Sub NVS_RecolorSelected()
     ResetCaches
     Set items = NVS_GetSelectedItems()
     If items.Count = 0 Then
-        MsgBox "Select one or more emails first.", vbInformation, NVS_APP
+        MsgBox "Select one or more emails first.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
     gNVS_Busy = True
@@ -574,7 +666,7 @@ Public Sub NVS_RecolorSelected()
     Next
     gNVS_Busy = False
     If colored = 0 Then
-        MsgBox "No color applied: the chain isn't filed in a folder that has a color.", vbInformation, NVS_APP
+        MsgBox "No color applied: the chain isn't filed in a folder that has a color.", vbInformation + vbMsgBoxSetForeground, NVS_APP
     End If
 End Sub
 
@@ -635,7 +727,7 @@ Public Sub NVS_ApplyRowColorsToView()
     Set v = Application.ActiveExplorer.CurrentView
     If v.ViewType <> olTableView Then
         MsgBox "Switch this folder to a list view (View > Change View > Compact or Single) first.", _
-               vbExclamation, NVS_APP
+               vbExclamation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
     Set tv = v
@@ -668,10 +760,10 @@ Public Sub NVS_ApplyRowColorsToView()
     tv.Apply
     MsgBox added & " row color rule(s) set on this view." & vbCrLf & _
            "To change their order or look: View > View Settings > Conditional Formatting.", _
-           vbInformation, NVS_APP
+           vbInformation + vbMsgBoxSetForeground, NVS_APP
     Exit Sub
 Fail:
-    MsgBox "Couldn't change this view: " & Err.Description, vbExclamation, NVS_APP
+    MsgBox "Couldn't change this view: " & Err.Description, vbExclamation + vbMsgBoxSetForeground, NVS_APP
 End Sub
 
 '==============================================================================
@@ -691,7 +783,7 @@ Public Sub NVS_SaveEmailAndAttachments()
     ResetCaches
     Set items = NVS_GetSelectedItems()
     If items.Count = 0 Then
-        MsgBox "Select or open an email first.", vbInformation, NVS_APP
+        MsgBox "Select or open an email first.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
     oneEmail = (items.Count = 1)
@@ -737,7 +829,7 @@ Public Sub NVS_SaveEmailAndAttachments()
         SaveAttachments it, folder, overwrite, errs
     Next
 
-    If errs <> "" Then MsgBox "Some items couldn't be saved:" & vbCrLf & vbCrLf & errs, vbExclamation, NVS_APP
+    If errs <> "" Then MsgBox "Some items couldn't be saved:" & vbCrLf & vbCrLf & errs, vbExclamation + vbMsgBoxSetForeground, NVS_APP
 End Sub
 
 ' Save Locations window: the base folder, plus a Windows folder for any
@@ -901,7 +993,7 @@ Private Function SaveStartFolder(ByVal item As Object) As String
 
     MsgBox "First, choose your base save folder." & vbCrLf & vbCrLf & _
            "Save Email + Attachments opens there for emails that aren't in an Outlook folder with " & _
-           "its own save location. Use Save Locations to change it or to add folders.", vbInformation, NVS_APP
+           "its own save location. Use Save Locations to change it or to add folders.", vbInformation + vbMsgBoxSetForeground, NVS_APP
     p = PickWindowsFolder("Base save folder: open it, then click Save", DocumentsFolder())
     If p = "" Then Exit Function
     SaveSetting NVS_APP, SEC_SAVE, KEY_BASE, p
@@ -1049,7 +1141,7 @@ Public Sub NVS_RenameAttachments()
     Set m = CurrentDraft()
     If m Is Nothing Then
         MsgBox "Open the email you're writing (or start a reply) first." & vbCrLf & _
-               "Attachments can only be renamed on emails that haven't been sent.", vbInformation, NVS_APP
+               "Attachments can only be renamed on emails that haven't been sent.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -1070,7 +1162,7 @@ Public Sub NVS_RenameAttachments()
     Next
     If n = 0 Then
         MsgBox "This email has no file attachments to rename." & vbCrLf & _
-               "(OneDrive links and pictures in the body can't be renamed.)", vbInformation, NVS_APP
+               "(OneDrive links and pictures in the body can't be renamed.)", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -1137,10 +1229,10 @@ Rollback:
             added(i).Delete
         Next
         MsgBox "Couldn't rename the attachments: " & errText & vbCrLf & "The email is unchanged.", _
-               vbExclamation, NVS_APP
+               vbExclamation + vbMsgBoxSetForeground, NVS_APP
     Else
         MsgBox "The renamed files were attached, but some originals couldn't be removed: " & errText & _
-               vbCrLf & "Delete the old copies by hand.", vbExclamation, NVS_APP
+               vbCrLf & "Delete the old copies by hand.", vbExclamation + vbMsgBoxSetForeground, NVS_APP
     End If
 Cleanup:
     On Error Resume Next
@@ -1184,7 +1276,7 @@ Public Sub NVS_Search()
         If mSearchForm Is Nothing Then
             MsgBox "The Search window isn't set up yet." & vbCrLf & vbCrLf & _
                    "Add file 5: a UserForm named NVS_mail_Search, with the code from " & _
-                   "5_NVS_mail_Search.txt. See README.md.", vbInformation, NVS_APP
+                   "5_NVS_mail_Search.txt. See README.md.", vbInformation + vbMsgBoxSetForeground, NVS_APP
             Exit Sub
         End If
     End If
@@ -1218,7 +1310,7 @@ Public Sub NVS_SetRibbonShortcuts()
     removing = (Len(NVS_RIBBON_TAB_KEY) = 0)
     If Not removing And Not RibbonKeyOK(NVS_RIBBON_TAB_KEY) Then
         MsgBox "NVS_RIBBON_TAB_KEY, at the top of the NVS_mail module, must be one to three " & _
-               "letters or digits.", vbExclamation, NVS_APP
+               "letters or digits.", vbExclamation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -1267,7 +1359,7 @@ Public Sub NVS_SetRibbonShortcuts()
                   "Customize Ribbon, click New Tab, Rename... it to NVS_mail, add the NVS_ macros " & _
                   "to it and click OK. Then run this again."
         End If
-        MsgBox msg, vbExclamation, NVS_APP
+        MsgBox msg, vbExclamation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -1291,7 +1383,7 @@ Public Sub NVS_SetRibbonShortcuts()
         msg = msg & "Run this again whenever you change the NVS_mail tab."
     End If
     If Len(problems) > 0 Then msg = msg & vbCrLf & vbCrLf & "Couldn't change:" & problems
-    MsgBox msg, vbInformation, NVS_APP
+    MsgBox msg, vbInformation + vbMsgBoxSetForeground, NVS_APP
 End Sub
 
 ' Sets the shortcut keys in one of Outlook's ribbon files. Returns 1 if it
@@ -1743,6 +1835,158 @@ Private Sub RibbonWriteFile(ByVal path As String, ByVal s As String, ByVal wide 
 End Sub
 
 '==============================================================================
+' Find a Time (optional file 6)
+'==============================================================================
+
+' Opens Find a Time with everyone on the selected chain: their calendars side
+' by side, the times most of them can make listed first, and the meeting
+' invite for the time you pick. Works with nothing selected too (just you).
+Public Sub NVS_FindTime()
+    Dim items As Collection, people As Collection, topic As String, owner As LongPtr
+    owner = GetForegroundWindow()
+    If mFindForm Is Nothing Then
+        On Error Resume Next
+        Set mFindForm = VBA.UserForms.Add("NVS_mail_FindTime")
+        On Error GoTo 0
+        If mFindForm Is Nothing Then
+            MsgBox "Find a Time isn't set up yet." & vbCrLf & vbCrLf & _
+                   "Add file 6: a UserForm named NVS_mail_FindTime, with the code from " & _
+                   "6_NVS_mail_FindTime.txt. See README.md.", vbInformation + vbMsgBoxSetForeground, NVS_APP
+            Exit Sub
+        End If
+    End If
+
+    On Error GoTo Fail
+    Set items = NVS_GetSelectedItems()
+    Set people = New Collection
+    If items.Count > 0 Then
+        ChainPeopleFor items, people
+        On Error Resume Next
+        topic = items(1).ConversationTopic
+        If topic = "" Then topic = items(1).Subject
+        On Error GoTo Fail
+        topic = NVS_MEETING_SUBJECT_PREFIX & topic
+    End If
+    NVS_Log "Find a Time: " & people.Count & " people from the chain"
+    mFindForm.StartFor people, topic, owner
+    Exit Sub
+Fail:
+    MsgBox "Find a Time couldn't open: " & Err.Description, vbExclamation + vbMsgBoxSetForeground, NVS_APP
+End Sub
+
+' Everyone on the chains of these emails, as Array(name, address, "R" or "O")
+' in the order they turn up, newest email first: the sender and the To line
+' are required, Cc is optional (NVS_CC_AS_OPTIONAL). You're left out. Only the
+' newest 30 emails of a chain are opened, so a long chain is quick too.
+Private Sub ChainPeopleFor(ByVal items As Collection, ByVal people As Collection)
+    Dim found As Object, convs As Object, mine As Object, sel As Object, it As Object
+    Dim rows() As NvsRow, n As Long, sid As String, cid As String, k As Variant
+    Dim taken() As Boolean, i As Long, j As Long, best As Long, opened As Long
+
+    Set found = CreateObject("Scripting.Dictionary")
+    found.CompareMode = vbTextCompare
+    Set convs = CreateObject("Scripting.Dictionary")
+    Set mine = NVS_MyAddresses()
+
+    For Each sel In items
+        cid = ""
+        On Error Resume Next
+        cid = sel.ConversationID
+        On Error GoTo 0
+        If cid = "" Or Not convs.Exists(cid) Then
+            If cid <> "" Then convs.Add cid, True
+            n = ReadChain(sel, rows, sid)
+            If n > 0 Then
+                ReDim taken(1 To n)
+                For opened = 1 To 30
+                    best = 0
+                    For j = 1 To n                   ' the newest email not opened yet
+                        If Not taken(j) And rows(j).IsMail Then
+                            If best = 0 Then
+                                best = j
+                            ElseIf rows(j).Stamp > rows(best).Stamp Then
+                                best = j
+                            End If
+                        End If
+                    Next
+                    If best = 0 Then Exit For
+                    taken(best) = True
+                    Set it = Nothing
+                    On Error Resume Next
+                    Set it = Application.Session.GetItemFromID(rows(best).EntryID, sid)
+                    On Error GoTo 0
+                    If Not it Is Nothing Then PeopleOf it, found, mine
+                Next
+            End If
+        End If
+        PeopleOf sel, found, mine                    ' in case the chain couldn't be read
+    Next
+    For Each k In found.Keys
+        people.Add found(k)
+    Next
+End Sub
+
+Private Sub PeopleOf(ByVal it As Object, ByVal found As Object, ByVal mine As Object)
+    Dim i As Long, r As Outlook.Recipient
+    If Not NVS_IsMailLike(it) Then Exit Sub
+    On Error Resume Next
+    AddChainPerson found, mine, it.SenderName, NVS_SenderSmtp(it), "R"
+    For i = 1 To it.Recipients.Count
+        Set r = Nothing
+        Set r = it.Recipients.Item(i)
+        If Not r Is Nothing Then
+            If r.Type = olTo Then
+                AddChainPerson found, mine, r.Name, NVS_RecipientSmtp(r), "R"
+            ElseIf r.Type = olCC Then
+                AddChainPerson found, mine, r.Name, NVS_RecipientSmtp(r), IIf(NVS_CC_AS_OPTIONAL, "O", "R")
+            End If
+        End If
+    Next
+End Sub
+
+Private Sub AddChainPerson(ByVal found As Object, ByVal mine As Object, ByVal nm As String, _
+                           ByVal addr As String, ByVal role As String)
+    Dim v As Variant
+    addr = Trim$(addr)
+    nm = Trim$(nm)
+    If Len(nm) > 2 And Left$(nm, 1) = "'" And Right$(nm, 1) = "'" Then nm = Mid$(nm, 2, Len(nm) - 2)
+    If addr = "" Then Exit Sub
+    If mine.Exists(addr) Then Exit Sub
+    If nm = "" Then nm = addr
+    If found.Exists(addr) Then
+        If role = "R" Then
+            v = found(addr)
+            found(addr) = Array(v(0), addr, "R")
+        End If
+    Else
+        found.Add addr, Array(nm, addr, role)
+    End If
+End Sub
+
+' For Find a Time: the email address of a Recipient or an AddressEntry.
+Public Function NVS_AddressOf(ByVal obj As Object) As String
+    On Error Resume Next
+    If TypeOf obj Is Outlook.Recipient Then
+        NVS_AddressOf = NVS_RecipientSmtp(obj)
+    ElseIf TypeOf obj Is Outlook.AddressEntry Then
+        NVS_AddressOf = NVS_AddressEntrySmtp(obj)
+    End If
+End Function
+
+' For Find a Time: True if this is one of your own addresses.
+Public Function NVS_IsMe(ByVal addr As String) As Boolean
+    If mMine Is Nothing Then Set mMine = NVS_MyAddresses()
+    NVS_IsMe = mMine.Exists(Trim$(addr))
+End Function
+
+' For Find a Time: your own email address.
+Public Function NVS_MyAddress() As String
+    On Error Resume Next
+    NVS_MyAddress = NVS_AddressEntrySmtp(Application.Session.CurrentUser.AddressEntry)
+    If NVS_MyAddress = "" Then NVS_MyAddress = Application.Session.CurrentUser.Address
+End Function
+
+'==============================================================================
 ' Schedule a meeting with everyone on the chain
 '==============================================================================
 
@@ -1755,7 +1999,7 @@ Public Sub NVS_ScheduleMeetingWithChain()
 
     Set items = NVS_GetSelectedItems()
     If items.Count = 0 Then
-        MsgBox "Select or open an email in the chain first.", vbInformation, NVS_APP
+        MsgBox "Select or open an email in the chain first.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -1778,7 +2022,7 @@ Public Sub NVS_ScheduleMeetingWithChain()
     Next
 
     If people.Count = 0 Then
-        MsgBox "Couldn't find anyone else on this chain.", vbInformation, NVS_APP
+        MsgBox "Couldn't find anyone else on this chain.", vbInformation + vbMsgBoxSetForeground, NVS_APP
         Exit Sub
     End If
 
@@ -1841,56 +2085,125 @@ End Sub
 ' Events - called from ThisOutlookSession
 '==============================================================================
 
-' New mail arrived in the Inbox: color it like the rest of its chain. When
-' several emails of one chain arrive together, the chain is done once.
+' New mail arrived. It's colored a few seconds later rather than straight
+' away: Outlook's own rules get to the email first (saving an email while a
+' rule is moving it is what makes Outlook say it couldn't apply the rules),
+' and a burst of new mail is done a few at a time, so Outlook stays usable.
 Public Sub NVS_OnNewMail(ByVal entryIDs As String)
-    Dim ids() As String, i As Long, it As Object, seen As Object, cid As String
+    Dim ids() As String, i As Long, n As Long
     On Error Resume Next
     SearchNote "inbox"
     If Not NVS_AUTO_COLOR Then Exit Sub
-    FreshFolderInfo
-    If MappedCount() = 0 Then Exit Sub
-
-    Set seen = CreateObject("Scripting.Dictionary")
     ids = Split(entryIDs, ",")
     For i = LBound(ids) To UBound(ids)
-        Set it = Nothing
-        Set it = Application.Session.GetItemFromID(Trim$(ids(i)))
-        If Not it Is Nothing Then
-            If TypeOf it Is Outlook.MailItem Then
-                cid = ""
-                cid = it.ConversationID
-                If cid = "" Then
-                    RecolorChain it, False, ""
-                ElseIf Not seen.Exists(cid) Then
-                    seen.Add cid, True
-                    RecolorChain it, False, ""
-                    MarkDone cid
-                End If
-            End If
+        If Trim$(ids(i)) <> "" Then
+            QueueWork Trim$(ids(i)), "", NVS_NEW_MAIL_DELAY
+            n = n + 1
         End If
     Next
+    If n > 1 Then NVS_Log "new mail: " & n & " emails queued"
 End Sub
 
-' An email landed in Sent Items, or in the folder it was just moved to.
+' An email landed in Sent Items, or in the folder it was just moved to. Its
+' chain is recolored a moment later, the same way as new mail.
 Public Sub NVS_OnItemFiled(ByVal item As Object)
-    Dim cid As String, ci As String
+    Dim eid As String, sid As String
     On Error Resume Next
     If Not mSearchForm Is Nothing Then SearchNote item.Parent.EntryID
     If Not NVS_AUTO_COLOR Then Exit Sub
     If gNVS_Busy Then Exit Sub
     If Not TypeOf item Is Outlook.MailItem Then Exit Sub
-    FreshFolderInfo
-    If MappedCount() = 0 Then Exit Sub
+    eid = item.EntryID
+    sid = item.Parent.StoreID
+    If eid <> "" Then QueueWork eid, sid, 1
+End Sub
 
-    cid = item.ConversationID
-    ci = item.ConversationIndex
-    If RecentlyDone(cid) Then
-        FixOwnColor item              ' the rest of its chain was recolored a moment ago
-    ElseIf Len(ci) = 44 And Not NVS_IsFilingFolder(item.Parent) Then
-        ' A brand-new email you sent: there's no chain to color yet.
+' Adds an email to the list of ones to color, delaySec seconds from now.
+Private Sub QueueWork(ByVal eid As String, ByVal sid As String, ByVal delaySec As Single)
+    If mQueue Is Nothing Then Set mQueue = New Collection
+    If mQueue.Count >= 400 Then Exit Sub          ' a flood, such as a big sync: leave the rest
+    mQueue.Add Array(eid, sid, Timer, delaySec)
+    ArmWorkTimer 400
+End Sub
+
+Private Sub ArmWorkTimer(ByVal ms As Long)
+    If mWorkTimer <> 0 Then Exit Sub
+    mWorkTimer = SetTimer(0, 0, ms, AddressOf NVS_WorkTimer)
+End Sub
+
+' Windows calls this when the work timer is due. It colors the emails whose
+' time has come for at most a quarter of a second, then hands Outlook back
+' and comes again for the rest. While NVS_mail is busy with a button, it waits.
+Public Sub NVS_WorkTimer(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal idEvent As LongPtr, _
+                         ByVal dwTime As Long)
+    On Error Resume Next
+    KillTimer 0, idEvent
+    If idEvent = mWorkTimer Then mWorkTimer = 0
+    If mInWork Then Exit Sub
+    If gNVS_Busy Then
+        ArmWorkTimer 1500
+        Exit Sub
+    End If
+    DoQueuedWork
+End Sub
+
+Private Sub DoQueuedWork()
+    Dim t0 As Single, w As Variant, i As Long, done As Long, waiting As Boolean
+    On Error GoTo Quit
+    If mQueue Is Nothing Then Exit Sub
+    mInWork = True
+    t0 = Timer
+    FreshFolderInfo
+    If MappedCount() = 0 Then
+        Set mQueue = Nothing                       ' no folder has a color: nothing to do
+        GoTo Quit
+    End If
+    i = 1
+    Do While i <= mQueue.Count
+        w = mQueue(i)
+        If SecondsSince(CSng(w(2))) < CSng(w(3)) Then
+            i = i + 1                              ' not due yet
+            waiting = True
+        Else
+            mQueue.Remove i
+            ColorQueuedEmail CStr(w(0)), CStr(w(1))
+            done = done + 1
+            If SecondsSince(t0) > 0.25 Then Exit Do
+        End If
+    Loop
+    If done > 0 And SecondsSince(t0) > 0.3 Then
+        NVS_Log "colored " & done & " new/filed emails in " & Format$(SecondsSince(t0), "0.00") & _
+                " s, " & mQueue.Count & " left"
+    End If
+Quit:
+    mInWork = False
+    If Not mQueue Is Nothing Then
+        If mQueue.Count = 0 Then
+            Set mQueue = Nothing
+        Else
+            If waiting And done = 0 Then ArmWorkTimer 500 Else ArmWorkTimer 60
+        End If
+    End If
+End Sub
+
+Private Sub ColorQueuedEmail(ByVal eid As String, ByVal sid As String)
+    Dim it As Object, cid As String, ci As String
+    On Error Resume Next
+    If sid = "" Then
+        Set it = Application.Session.GetItemFromID(eid)
     Else
-        RecolorChain item, False, ""
+        Set it = Application.Session.GetItemFromID(eid, sid)
+    End If
+    If it Is Nothing Then Exit Sub                 ' moved or deleted since
+    If Not TypeOf it Is Outlook.MailItem Then Exit Sub
+    cid = it.ConversationID
+    ci = it.ConversationIndex
+    If RecentlyDone(cid) Then
+        FixOwnColor it                             ' the rest of its chain was done a moment ago
+    ElseIf Len(ci) = 44 And Not NVS_IsFilingFolder(it.Parent) Then
+        ' The first email of a new chain, not filed: there's no chain color yet.
+    Else
+        RecolorChain it, False, ""
         MarkDone cid
     End If
 End Sub
@@ -2482,13 +2795,20 @@ Private Function RecolorChain(ByVal item As Object, ByVal force As Boolean, ByVa
                               Optional ByVal done As Object, Optional ByVal stripUnfiled As Boolean) As Boolean
     Dim rows() As NvsRow, n As Long, sid As String, key As String, chainCat As String, want As String
     Dim i As Long, info As Variant, newCats As String, colored As Boolean
+    Dim t0 As Single, oldest As Date, saved As Long, stopped As Boolean
 
     On Error GoTo Quit
     If Not force Then
         If MappedCount() = 0 Then Exit Function
     End If
 
+    t0 = Timer
     n = ReadChain(item, rows, sid)
+    ' A huge "chain" (Outlook groups automated emails with the same subject
+    ' into one) is only recolored as far back as NVS_RECOLOR_DAYS_BACK when it
+    ' happens on its own - on arrival or after a move - and never for more than
+    ' a few seconds, so it can't hold Outlook up.
+    If Not force And n > 100 And NVS_RECOLOR_DAYS_BACK > 0 Then oldest = Date - NVS_RECOLOR_DAYS_BACK
     If Not done Is Nothing Then
         For i = 1 To n
             done(rows(i).EntryID) = True
@@ -2503,19 +2823,30 @@ Private Function RecolorChain(ByVal item As Object, ByVal force As Boolean, ByVa
     End If
 
     For i = 1 To n
-        If rows(i).IsMail Then
+        If rows(i).IsMail And rows(i).Stamp >= oldest Then
             info = FolderInfo(rows(i).FolderKey, sid)
             If info(2) Then                                 ' mail here may be recolored
                 If info(0) Then want = info(1) Else want = chainCat
                 If want <> "" Then colored = True
                 If WantCategories(rows(i).Categories, want, alsoStrip, newCats) Then
                     SaveCategories rows(i).EntryID, sid, newCats
+                    saved = saved + 1
+                    If Not force Then
+                        If SecondsSince(t0) > 4 Then
+                            stopped = True
+                            Exit For
+                        End If
+                    End If
                 End If
             End If
         End If
     Next
     RecolorChain = colored
 Quit:
+    If n > 100 Or SecondsSince(t0) > 0.5 Then
+        NVS_Log "chain: " & n & " emails, " & saved & " recolored in " & Format$(SecondsSince(t0), "0.00") & _
+                " s" & IIf(stopped, " (stopped early: it's very large)", "")
+    End If
 End Function
 
 ' Gives one email the color of the folder it's filed in (used when the rest
@@ -2831,6 +3162,7 @@ Private Function NVS_GetSelectedItems() As Collection
         curID = cur.EntryID
         sid = cur.StoreID
         For i = 1 To hdrs.Count
+            If col.Count >= 1000 Then Exit For         ' a huge selection: don't open more
             Set conv = Nothing
             Set conv = hdrs.Item(i).GetConversation
             n = 0
@@ -2891,9 +3223,11 @@ End Function
 Private Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal hint As String, _
                             ByVal defaultFolder As Outlook.Folder, ByVal okCaption As String) As Outlook.Folder
     Dim dlg As NVS_mail_Dialog
+    NVS_Log title & " window opened"
     Set dlg = New NVS_mail_Dialog
     Set PickFolder = dlg.PickFolder(title, prompt, hint, defaultFolder, okCaption)
     Unload dlg
+    NVS_Log title & " window closed"
 End Function
 
 ' Builds the folder list for the default mailbox plus any extra stores (e.g.
@@ -3172,4 +3506,180 @@ Private Function NVS_IsInlineAttachment(ByVal att As Outlook.Attachment, ByVal i
     If html <> "" Then
         If InStr(1, html, "cid:" & cid, vbTextCompare) > 0 Then NVS_IsInlineAttachment = True
     End If
+End Function
+
+'==============================================================================
+' Windows: placing NVS_mail's windows, the mouse wheel, the log
+'==============================================================================
+
+' Finds a form's window, fits it on the screen of the Outlook window you were
+' working in (owner) - shrinking it if that screen is too small, as a laptop
+' screen can be - centers it there and brings it to the front, so it never
+' opens off screen or behind Outlook. Returns the window's handle (0 if it
+' couldn't be found). resizable adds a sizing border; maximizable a Maximize
+' button too.
+Public Function NVS_PlaceForm(ByVal frm As Object, ByVal owner As LongPtr, ByVal resizable As Boolean, _
+                              Optional ByVal maximizable As Boolean) As LongPtr
+    Dim hForm As LongPtr, cap As String, ownerRc As NvsRect, formRc As NvsRect, mi As NvsMonitorInfo
+    Dim hMon As LongPtr, w As Long, h As Long, x As Long, y As Long, workW As Long, workH As Long
+    Dim ppt As Double, haveOwner As Boolean, style As LongPtr
+
+    On Error GoTo Done
+    cap = frm.Caption
+    frm.Caption = "NVS_mail_" & CStr(ObjPtr(frm))
+    hForm = FindWindowW(StrPtr("ThunderDFrame"), StrPtr(frm.Caption))
+    frm.Caption = cap
+    If hForm = 0 Then Exit Function
+    NVS_PlaceForm = hForm
+
+    If resizable Then
+        style = GetWindowLongPtrW(hForm, GWL_STYLE)
+        style = style Or WS_THICKFRAME
+        If maximizable Then style = style Or WS_MAXIMIZEBOX
+        SetWindowLongPtrW hForm, GWL_STYLE, style
+        SetWindowPos hForm, 0, 0, 0, 0, 0, SWP_NOMOVE Or SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE Or SWP_FRAMECHANGED
+    End If
+
+    haveOwner = (owner <> 0 And owner <> hForm)
+    If haveOwner Then haveOwner = (IsWindow(owner) <> 0)
+    If haveOwner Then hMon = MonitorFromWindow(owner, 2) Else hMon = MonitorFromWindow(hForm, 2)
+    mi.cbSize = LenB(mi)
+    If GetMonitorInfoW(hMon, mi) = 0 Then GoTo Front
+    workW = mi.rcWork.Right - mi.rcWork.Left
+    workH = mi.rcWork.Bottom - mi.rcWork.Top
+
+    ' Bigger than this screen: shrink it to fit (sizes are in points, the
+    ' screen in pixels, so work out how many pixels a point is here).
+    If GetWindowRect(hForm, formRc) = 0 Then GoTo Front
+    w = formRc.Right - formRc.Left
+    h = formRc.Bottom - formRc.Top
+    If frm.Width > 0 Then ppt = w / frm.Width
+    If ppt > 0 And (w > workW - 8 Or h > workH - 8) Then
+        If w > workW - 8 Then frm.Width = (workW - 8) / ppt
+        If h > workH - 8 Then frm.Height = (workH - 8) / ppt
+        If GetWindowRect(hForm, formRc) = 0 Then GoTo Front
+        w = formRc.Right - formRc.Left
+        h = formRc.Bottom - formRc.Top
+    End If
+
+    ' Centered on the Outlook window, and kept inside its screen.
+    If haveOwner Then haveOwner = (GetWindowRect(owner, ownerRc) <> 0)
+    If haveOwner Then
+        x = ownerRc.Left + (ownerRc.Right - ownerRc.Left - w) \ 2
+        y = ownerRc.Top + (ownerRc.Bottom - ownerRc.Top - h) \ 2
+    Else
+        x = mi.rcWork.Left + (workW - w) \ 2
+        y = mi.rcWork.Top + (workH - h) \ 2
+    End If
+    If x + w > mi.rcWork.Right Then x = mi.rcWork.Right - w
+    If y + h > mi.rcWork.Bottom Then y = mi.rcWork.Bottom - h
+    If x < mi.rcWork.Left Then x = mi.rcWork.Left
+    If y < mi.rcWork.Top Then y = mi.rcWork.Top
+    SetWindowPos hForm, 0, x, y, 0, 0, SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE
+Front:
+    ' In front of Outlook, with the keyboard.
+    SetWindowPos hForm, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE Or SWP_NOSIZE
+    SetForegroundWindow hForm
+Done:
+End Function
+
+' The mouse wheel. Outlook's VBA windows ignore it, so while one of NVS_mail's
+' windows is open a hook hands wheel turns over that window to its NvsWheel
+' method (the newest window opened gets them). NVS_MOUSE_WHEEL = False turns
+' this off.
+Public Sub NVS_WheelOn(ByVal frm As Object, ByVal hForm As LongPtr)
+    If Not NVS_MOUSE_WHEEL Then Exit Sub
+    If hForm = 0 Then Exit Sub
+    On Error Resume Next
+    NVS_WheelOff frm, True
+    If mWheelForms Is Nothing Then Set mWheelForms = New Collection
+    mWheelForms.Add Array(frm, hForm)
+    If mWheelHook = 0 Then mWheelHook = SetWindowsHookExW(WH_MOUSE, AddressOf NVS_WheelProc, 0, GetCurrentThreadId())
+End Sub
+
+Public Sub NVS_WheelOff(ByVal frm As Object, Optional ByVal keepHook As Boolean)
+    Dim i As Long, v As Variant
+    On Error Resume Next
+    If Not mWheelForms Is Nothing Then
+        For i = mWheelForms.Count To 1 Step -1
+            v = mWheelForms(i)
+            If v(0) Is frm Then mWheelForms.Remove i
+        Next
+        If mWheelForms.Count = 0 Then Set mWheelForms = Nothing
+    End If
+    If mWheelForms Is Nothing And mWheelHook <> 0 And Not keepHook Then
+        UnhookWindowsHookEx mWheelHook
+        mWheelHook = 0
+    End If
+End Sub
+
+' Called by Windows for each mouse message while the hook is on. Wheel turns
+' over the window are passed to it and not to Outlook; everything else goes
+' on as normal.
+Public Function NVS_WheelProc(ByVal nCode As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr) As LongPtr
+    Dim v As Variant, rc As NvsRect, ptX As Long, ptY As Long, md As Long, notches As Long
+    On Error Resume Next
+    If nCode = 0 And wParam = WM_MOUSEWHEEL Then
+        If Not mWheelForms Is Nothing Then
+            v = mWheelForms(mWheelForms.Count)
+            RtlMoveMemory ptX, lParam, 4
+            RtlMoveMemory ptY, lParam + 4, 4
+            RtlMoveMemory md, lParam + NVS_MOUSEDATA_AT, 4
+            If GetWindowRect(v(1), rc) <> 0 Then
+                If ptX >= rc.Left And ptX < rc.Right And ptY >= rc.Top And ptY < rc.Bottom Then
+                    mWheelRest = mWheelRest + md \ &H10000
+                    notches = mWheelRest \ 120
+                    mWheelRest = mWheelRest - notches * 120
+                    If notches <> 0 Then v(0).NvsWheel notches
+                    NVS_WheelProc = 1
+                    Exit Function
+                End If
+            End If
+        End If
+    End If
+    NVS_WheelProc = CallNextHookEx(mWheelHook, nCode, wParam, lParam)
+End Function
+
+' Stops NVS_mail's timers and the wheel hook (called as Outlook closes; the
+' unused argument keeps it out of the Macros list).
+Public Sub NVS_Shutdown(Optional ByVal unused As Long)
+    On Error Resume Next
+    If mWorkTimer <> 0 Then KillTimer 0, mWorkTimer
+    mWorkTimer = 0
+    If mDlgTimer <> 0 Then KillTimer 0, mDlgTimer
+    mDlgTimer = 0
+    Set mQueue = Nothing
+    Set mWheelForms = Nothing
+    If mWheelHook <> 0 Then UnhookWindowsHookEx mWheelHook
+    mWheelHook = 0
+End Sub
+
+' Adds a line to NVS_mail.log in your TEMP folder: what NVS_mail did and how
+' long it took. If Outlook ever hangs, the last lines show what was running.
+' NVS_LOG = False turns it off. The file starts again when it reaches 300 KB.
+Public Sub NVS_Log(ByVal msg As String)
+    Static path As String
+    Dim fn As Integer, size As Long, t As Single
+    If Not NVS_LOG Then Exit Sub
+    On Error GoTo Done
+    If path = "" Then path = Environ$("TEMP") & "\NVS_mail.log"
+    size = 0
+    On Error Resume Next
+    size = FileLen(path)
+    On Error GoTo Done
+    If size > 300000 Then Kill path
+    t = Timer
+    fn = FreeFile
+    Open path For Append As #fn
+    Print #fn, Format$(Now, "yyyy-mm-dd hh:nn:ss") & "." & Format$(Int((t - Int(t)) * 1000), "000") & "  " & msg
+    Close #fn
+Done:
+End Sub
+
+' Seconds since t0 (a Timer value), across midnight too.
+Private Function SecondsSince(ByVal t0 As Single) As Single
+    Dim d As Single
+    d = Timer - t0
+    If d < 0 Then d = d + 86400
+    SecondsSince = d
 End Function

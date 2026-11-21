@@ -74,7 +74,7 @@ Public Sub NVS_TranscribeCall()
     On Error GoTo 0
     If mUIA Is Nothing Then
         MsgBox "Windows UI Automation isn't available on this PC, so Live Captions can't be read.", _
-               vbExclamation, "NVS_mail"
+               vbExclamation + vbMsgBoxSetForeground, "NVS_mail"
         Exit Sub
     End If
     If Not ConnectLiveCaptions() Then Exit Sub
@@ -124,7 +124,7 @@ Public Sub NVS_TranscribeCall()
     SaveTranscript filePath
     If mTranscript = "" Then
         MsgBox "Nothing was transcribed. Check that Live Captions shows captions while people talk " & _
-               "(see README.md).", vbInformation, "NVS_mail"
+               "(see README.md).", vbInformation + vbMsgBoxSetForeground, "NVS_mail"
         Exit Sub
     End If
     PutInEmail draft
@@ -148,7 +148,7 @@ Private Function ConnectLiveCaptions() As Boolean
     exe = LiveCaptionsExe()
     If exe = "" Then
         MsgBox "Live Captions wasn't found. It's part of Windows 11 (version 22H2 or later); " & _
-               "Windows 10 doesn't have it.", vbExclamation, "NVS_mail"
+               "Windows 10 doesn't have it.", vbExclamation + vbMsgBoxSetForeground, "NVS_mail"
         Exit Function
     End If
     On Error Resume Next
@@ -167,7 +167,7 @@ Private Function ConnectLiveCaptions() As Boolean
 
     MsgBox "Live Captions didn't come up. Open it once yourself with Windows key + Ctrl + L, " & _
            "finish its setup (the first time it downloads its speech files), then try again.", _
-           vbExclamation, "NVS_mail"
+           vbExclamation + vbMsgBoxSetForeground, "NVS_mail"
 End Function
 
 Private Function LiveCaptionsExe() As String

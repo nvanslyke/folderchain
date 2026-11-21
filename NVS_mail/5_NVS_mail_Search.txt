@@ -66,51 +66,9 @@ Private Const F_FROM As String = "urn:schemas:httpmail:fromname"
 Private Const F_TO As String = "urn:schemas:httpmail:displayto"
 Private Const F_CC As String = "urn:schemas:httpmail:displaycc"
 
-' Window placement and resizing
-Private Type NvsRect
-    Left As Long
-    Top As Long
-    Right As Long
-    Bottom As Long
-End Type
-
-Private Type NvsMonitorInfo
-    cbSize As Long
-    rcMonitor As NvsRect
-    rcWork As NvsRect
-    dwFlags As Long
-End Type
-
-Private Const GWL_STYLE As Long = -16
-Private Const WS_THICKFRAME As Long = &H40000
-Private Const SWP_NOSIZE As Long = &H1
-Private Const SWP_NOMOVE As Long = &H2
-Private Const SWP_NOZORDER As Long = &H4
-Private Const SWP_NOACTIVATE As Long = &H10
-Private Const SWP_FRAMECHANGED As Long = &H20
-
+' Window placement and the mouse wheel are handled by NVS_mail (file 1).
 Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As Long)
 Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
-Private Declare PtrSafe Function IsWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
-Private Declare PtrSafe Function FindWindowW Lib "user32" (ByVal lpClassName As LongPtr, _
-    ByVal lpWindowName As LongPtr) As LongPtr
-Private Declare PtrSafe Function GetWindowRect Lib "user32" (ByVal hWnd As LongPtr, ByRef lpRect As NvsRect) As Long
-Private Declare PtrSafe Function SetWindowPos Lib "user32" (ByVal hWnd As LongPtr, ByVal hWndInsertAfter As LongPtr, _
-    ByVal X As Long, ByVal Y As Long, ByVal cx As Long, ByVal cy As Long, ByVal uFlags As Long) As Long
-Private Declare PtrSafe Function MonitorFromWindow Lib "user32" (ByVal hWnd As LongPtr, ByVal dwFlags As Long) As LongPtr
-Private Declare PtrSafe Function GetMonitorInfoW Lib "user32" (ByVal hMonitor As LongPtr, _
-    ByRef lpmi As NvsMonitorInfo) As Long
-#If Win64 Then
-Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long) As LongPtr
-Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
-#Else
-Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" Alias "GetWindowLongW" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long) As LongPtr
-Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" Alias "SetWindowLongW" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
-#End If
 
 ' Controls
 Private WithEvents mApp As Outlook.Application       ' tells us when a message-text search finishes
@@ -138,7 +96,7 @@ Private lblHFolder As MSForms.Label
 
 Private mBuilt As Boolean            ' the window's controls exist and are set up
 Private mControls As Boolean         ' the controls exist (set a little earlier than mBuilt)
-Private mSizable As Boolean
+Private mHwnd As LongPtr             ' this window, once shown
 Private mIgnore As Boolean           ' True while the code itself changes a control
 Private mHint As Boolean             ' the how-to text is still showing under the list
 Private mPreviewBody As Boolean      ' the preview is showing the selected email's text
@@ -260,7 +218,8 @@ Public Sub ShowSearch()
     If Not mBuilt Then BuildUI
     If Not Me.Visible Then
         Me.Show vbModeless
-        PlaceWindow owner
+        mHwnd = NVS_PlaceForm(Me, owner, True, True)    ' fits the screen, comes to the front
+        NVS_WheelOn Me, mHwnd
     End If
     FillWhere
     cboQuery.SetFocus
@@ -270,7 +229,7 @@ Public Sub ShowSearch()
     EnsureFresh False
     Exit Sub
 Fail:
-    MsgBox "The Search window couldn't open: " & Err.Description, vbExclamation, "NVS_mail"
+    MsgBox "The Search window couldn't open: " & Err.Description, vbExclamation + vbMsgBoxSetForeground, "NVS_mail"
 End Sub
 
 Private Sub BuildUI()
@@ -486,7 +445,24 @@ Private Sub CloseWindow()
     SaveSetting "NVS_mail", "Window", "SearchWidth", CStr(CLng(Me.Width))
     SaveSetting "NVS_mail", "Window", "SearchHeight", CStr(CLng(Me.Height))
     StopTextSearch
+    NVS_WheelOff Me
     Me.Hide
+End Sub
+
+Private Sub UserForm_Terminate()
+    On Error Resume Next
+    NVS_WheelOff Me
+End Sub
+
+' The mouse wheel turned over this window (called by NVS_mail's wheel hook).
+Public Sub NvsWheel(ByVal notches As Long)
+    Dim t As Long
+    On Error Resume Next
+    If lstResults.ListCount = 0 Then Exit Sub
+    t = lstResults.TopIndex - 3 * notches
+    If t < 0 Then t = 0
+    If t > lstResults.ListCount - 1 Then t = lstResults.ListCount - 1
+    lstResults.TopIndex = t
 End Sub
 
 '------------------------------------------------------------------------------
@@ -567,54 +543,6 @@ Private Function NewCheck(ByVal l As Single, ByVal t As Single, ByVal w As Singl
     c.Font.Size = 9
     Set NewCheck = c
 End Function
-
-' Centers the window on the Outlook window you were working in - on the same
-' screen, kept inside it - and lets it be resized.
-Private Sub PlaceWindow(ByVal owner As LongPtr)
-    Dim hForm As LongPtr, ownerRc As NvsRect, formRc As NvsRect, mi As NvsMonitorInfo
-    Dim hMon As LongPtr, w As Long, h As Long, x As Long, y As Long
-    Dim realCap As String, tmpCap As String, cls As String
-
-    On Error GoTo Done
-    realCap = Me.Caption
-    tmpCap = "NVS_mail_" & CStr(ObjPtr(Me))
-    cls = "ThunderDFrame"
-    Me.Caption = tmpCap
-    hForm = FindWindowW(StrPtr(cls), StrPtr(tmpCap))
-    Me.Caption = realCap
-    If hForm = 0 Then Exit Sub
-    If Not mSizable Then
-        MakeResizable hForm
-        mSizable = True
-    End If
-
-    If owner = 0 Or owner = hForm Then Exit Sub
-    If IsWindow(owner) = 0 Then Exit Sub
-    If GetWindowRect(owner, ownerRc) = 0 Then Exit Sub
-    If GetWindowRect(hForm, formRc) = 0 Then Exit Sub
-    w = formRc.Right - formRc.Left
-    h = formRc.Bottom - formRc.Top
-    x = ownerRc.Left + (ownerRc.Right - ownerRc.Left - w) \ 2
-    y = ownerRc.Top + (ownerRc.Bottom - ownerRc.Top - h) \ 2
-
-    hMon = MonitorFromWindow(owner, 2)              ' the screen Outlook is on
-    mi.cbSize = LenB(mi)
-    If GetMonitorInfoW(hMon, mi) <> 0 Then
-        If x + w > mi.rcWork.Right Then x = mi.rcWork.Right - w
-        If y + h > mi.rcWork.Bottom Then y = mi.rcWork.Bottom - h
-        If x < mi.rcWork.Left Then x = mi.rcWork.Left
-        If y < mi.rcWork.Top Then y = mi.rcWork.Top
-    End If
-    SetWindowPos hForm, 0, x, y, 0, 0, SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE
-Done:
-End Sub
-
-Private Sub MakeResizable(ByVal hForm As LongPtr)
-    Dim style As LongPtr
-    style = GetWindowLongPtrW(hForm, GWL_STYLE)
-    SetWindowLongPtrW hForm, GWL_STYLE, style Or WS_THICKFRAME
-    SetWindowPos hForm, 0, 0, 0, 0, 0, SWP_NOMOVE Or SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE Or SWP_FRAMECHANGED
-End Sub
 
 '==============================================================================
 ' Typing, clicking and keys
@@ -816,7 +744,7 @@ Private Function AskCustomDates() As Boolean
     s = Trim$(s)
     If s <> "" Then
         If Not IsDate(s) Then
-            MsgBox "'" & s & "' isn't a date.", vbExclamation, "NVS_mail"
+            MsgBox "'" & s & "' isn't a date.", vbExclamation + vbMsgBoxSetForeground, "NVS_mail"
             Exit Function
         End If
         d0 = DateValue(CDate(s))
@@ -829,7 +757,7 @@ Private Function AskCustomDates() As Boolean
     s = Trim$(s)
     If s <> "" Then
         If Not IsDate(s) Then
-            MsgBox "'" & s & "' isn't a date.", vbExclamation, "NVS_mail"
+            MsgBox "'" & s & "' isn't a date.", vbExclamation + vbMsgBoxSetForeground, "NVS_mail"
             Exit Function
         End If
         d1 = DateValue(CDate(s)) + 1

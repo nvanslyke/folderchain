@@ -18,10 +18,13 @@ Private Const MODE_PROGRESS As Long = 5
 Private Const MODE_TRANSCRIBE As Long = 6
 
 Private Const UI_FONT As String = "Segoe UI"
+Private Const ICON_FONT As String = "Segoe MDL2 Assets"   ' Windows 10/11's own icon font
 Private Const GRID_X As Single = 47     ' color grid position and cell size
 Private Const GRID_Y As Single = 24
 Private Const CELL As Single = 30
 Private Const SWATCH As Single = 24
+Private Const ROW_H As Single = 15      ' Move Items: height of a folder row
+Private Const INDENT As Single = 12     ' Move Items: indent per folder level
 
 Private WithEvents btnOK As MSForms.CommandButton
 Private WithEvents btnCancel As MSForms.CommandButton
@@ -30,8 +33,10 @@ Private WithEvents btnAdd As MSForms.CommandButton
 Private WithEvents btnChange As MSForms.CommandButton
 Private WithEvents btnRemove As MSForms.CommandButton
 Private WithEvents txtFilter As MSForms.TextBox
-Private WithEvents lstFolders As MSForms.ListBox
-Private WithEvents lblHit As MSForms.Label        ' invisible click area over swatches / list rows
+Private WithEvents txtKeys As MSForms.TextBox     ' takes the keyboard for the folder tree, swatches, list rows
+Private WithEvents lblHit As MSForms.Label        ' invisible click area over folders / swatches / list rows
+Private WithEvents sbTree As MSForms.ScrollBar
+Private WithEvents fraTree As MSForms.Frame
 Private WithEvents txtCat As MSForms.TextBox
 
 Private lblPrompt As MSForms.Label
@@ -52,11 +57,20 @@ Private mAction As String
 Private mRows() As Long          ' list row -> folder index
 Private mRowCount As Long
 Private mSel As Long             ' selected folder index
+Private mSelRow As Long          ' its row (-1 = not shown)
+Private mTop As Long             ' first row on screen
+Private mSlots As Long           ' rows that fit on screen
+Private mHover As Long           ' row under the pointer (-1 = none)
 Private mResult As Long
 Private mStores As Collection
-Private mSelecting As Boolean
-Private mArrowClick As Boolean
-Private mSkipUp As Boolean
+Private mArrowDown As Boolean    ' the last click was on an arrow
+Private mPainting As Boolean
+Private mTreeFocus As Boolean    ' the keyboard is in Search or the tree
+Private mRowBack() As MSForms.Label
+Private mRowArrow() As MSForms.Label
+Private mRowName() As MSForms.Label
+Private mRowPath() As MSForms.Label
+Private mSlotsMade As Long
 
 ' Folder Color
 Private mColor As Long
@@ -78,56 +92,17 @@ Private mDiscardRequested As Boolean
 ' Window placement
 Private mOwner As LongPtr           ' the Outlook window you were working in
 Private mPlaced As Boolean
+Private mHwnd As LongPtr
 Private mExpanded As Object         ' Move Items: folder EntryID -> True if open
 
-Private Type NvsRect
-    Left As Long
-    Top As Long
-    Right As Long
-    Bottom As Long
-End Type
-
-Private Type NvsMonitorInfo
-    cbSize As Long
-    rcMonitor As NvsRect
-    rcWork As NvsRect
-    dwFlags As Long
-End Type
-
-Private Const GWL_STYLE As Long = -16
-Private Const WS_THICKFRAME As Long = &H40000
-Private Const SWP_NOSIZE As Long = &H1
-Private Const SWP_NOMOVE As Long = &H2
-Private Const SWP_NOZORDER As Long = &H4
-Private Const SWP_NOACTIVATE As Long = &H10
-Private Const SWP_FRAMECHANGED As Long = &H20
-
 Private Declare PtrSafe Function GetForegroundWindow Lib "user32" () As LongPtr
-Private Declare PtrSafe Function IsWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
-Private Declare PtrSafe Function FindWindowW Lib "user32" (ByVal lpClassName As LongPtr, _
-    ByVal lpWindowName As LongPtr) As LongPtr
-Private Declare PtrSafe Function GetWindowRect Lib "user32" (ByVal hWnd As LongPtr, ByRef lpRect As NvsRect) As Long
-Private Declare PtrSafe Function SetWindowPos Lib "user32" (ByVal hWnd As LongPtr, ByVal hWndInsertAfter As LongPtr, _
-    ByVal X As Long, ByVal Y As Long, ByVal cx As Long, ByVal cy As Long, ByVal uFlags As Long) As Long
-Private Declare PtrSafe Function MonitorFromWindow Lib "user32" (ByVal hWnd As LongPtr, ByVal dwFlags As Long) As LongPtr
-Private Declare PtrSafe Function GetMonitorInfoW Lib "user32" (ByVal hMonitor As LongPtr, _
-    ByRef lpmi As NvsMonitorInfo) As Long
-#If Win64 Then
-Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long) As LongPtr
-Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
-#Else
-Private Declare PtrSafe Function GetWindowLongPtrW Lib "user32" Alias "GetWindowLongW" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long) As LongPtr
-Private Declare PtrSafe Function SetWindowLongPtrW Lib "user32" Alias "SetWindowLongW" (ByVal hWnd As LongPtr, _
-    ByVal nIndex As Long, ByVal dwNewLong As LongPtr) As LongPtr
-#End If
 
 Private Sub UserForm_Initialize()
     mCancelled = True
     mResult = -1
     mSel = -1
+    mSelRow = -1
+    mHover = -1
     mAction = "close"
     mOwner = GetForegroundWindow()      ' remembered before this window appears
 End Sub
@@ -136,11 +111,22 @@ Private Sub UserForm_Activate()
     On Error Resume Next
     If Not mPlaced Then
         mPlaced = True
-        PlaceWindow
+        Select Case mMode
+            Case MODE_FOLDER
+                mHwnd = NVS_PlaceForm(Me, mOwner, True)
+                NVS_WheelOn Me, mHwnd
+            Case MODE_LIST
+                mHwnd = NVS_PlaceForm(Me, mOwner, False)
+                NVS_WheelOn Me, mHwnd
+            Case Else
+                mHwnd = NVS_PlaceForm(Me, mOwner, False)
+        End Select
     End If
     Select Case mMode
         Case MODE_FOLDER
             txtFilter.SetFocus
+        Case MODE_COLOR, MODE_LIST
+            txtKeys.SetFocus
         Case MODE_RENAME
             mBoxes(1).SetFocus
             mBoxes(1).SelStart = 0
@@ -158,55 +144,36 @@ Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
         Else
             mCancelled = True
             mAction = "close"
-            Me.Hide
+            HideNow
         End If
     End If
+End Sub
+
+Private Sub UserForm_Terminate()
+    On Error Resume Next
+    NVS_WheelOff Me
 End Sub
 
 Private Sub UserForm_Resize()
     If mMode = MODE_FOLDER Then LayoutFolders
 End Sub
 
-' Centers the window on the Outlook window you were working in - on the same
-' screen, kept inside it - and lets the Move Items window be resized.
-Private Sub PlaceWindow()
-    Dim hForm As LongPtr, ownerRc As NvsRect, formRc As NvsRect, mi As NvsMonitorInfo
-    Dim hMon As LongPtr, w As Long, h As Long, x As Long, y As Long, cap As String
-
-    On Error GoTo Done
-    cap = Me.Caption
-    Me.Caption = "NVS_mail_" & CStr(ObjPtr(Me))
-    hForm = FindWindowW(StrPtr("ThunderDFrame"), StrPtr(Me.Caption))
-    Me.Caption = cap
-    If hForm = 0 Then Exit Sub
-    If mMode = MODE_FOLDER Then MakeResizable hForm
-
-    If mOwner = 0 Then Exit Sub
-    If IsWindow(mOwner) = 0 Then Exit Sub
-    If GetWindowRect(mOwner, ownerRc) = 0 Then Exit Sub
-    If GetWindowRect(hForm, formRc) = 0 Then Exit Sub
-    w = formRc.Right - formRc.Left
-    h = formRc.Bottom - formRc.Top
-    x = ownerRc.Left + (ownerRc.Right - ownerRc.Left - w) \ 2
-    y = ownerRc.Top + (ownerRc.Bottom - ownerRc.Top - h) \ 2
-
-    hMon = MonitorFromWindow(mOwner, 2)             ' the screen Outlook is on
-    mi.cbSize = LenB(mi)
-    If GetMonitorInfoW(hMon, mi) <> 0 Then
-        If x + w > mi.rcWork.Right Then x = mi.rcWork.Right - w
-        If y + h > mi.rcWork.Bottom Then y = mi.rcWork.Bottom - h
-        If x < mi.rcWork.Left Then x = mi.rcWork.Left
-        If y < mi.rcWork.Top Then y = mi.rcWork.Top
-    End If
-    SetWindowPos hForm, 0, x, y, 0, 0, SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE
-Done:
+' Hides the window (which ends Me.Show) and stops sending it the mouse wheel.
+Private Sub HideNow()
+    On Error Resume Next
+    NVS_WheelOff Me
+    Me.Hide
 End Sub
 
-Private Sub MakeResizable(ByVal hForm As LongPtr)
-    Dim style As LongPtr
-    style = GetWindowLongPtrW(hForm, GWL_STYLE)
-    SetWindowLongPtrW hForm, GWL_STYLE, style Or WS_THICKFRAME
-    SetWindowPos hForm, 0, 0, 0, 0, 0, SWP_NOMOVE Or SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE Or SWP_FRAMECHANGED
+' The mouse wheel turned over this window (called by NVS_mail's wheel hook).
+Public Sub NvsWheel(ByVal notches As Long)
+    On Error Resume Next
+    Select Case mMode
+        Case MODE_FOLDER
+            ScrollTree -3 * notches
+        Case MODE_LIST
+            If Not fraRows Is Nothing Then ScrollListBy -notches * mRowH * 2
+    End Select
 End Sub
 
 Private Sub btnOK_Click()
@@ -216,13 +183,13 @@ Private Sub btnOK_Click()
         Case MODE_COLOR
             If mColor >= 1 Then
                 mCancelled = False
-                Me.Hide
+                HideNow
             Else
                 Beep
             End If
         Case MODE_RENAME
             mCancelled = False
-            Me.Hide
+            HideNow
         Case MODE_TRANSCRIBE
             mStopRequested = True
             btnOK.Enabled = False
@@ -236,14 +203,41 @@ Private Sub btnCancel_Click()
         btnCancel.Enabled = False
         btnCancel.Caption = "Stopping..."
     ElseIf mMode = MODE_TRANSCRIBE Then
-        If MsgBox("Throw away this transcript?", vbYesNo + vbQuestion + vbDefaultButton2, "NVS_mail") = vbYes Then
+        If MsgBox("Throw away this transcript?", vbYesNo + vbQuestion + vbDefaultButton2 + vbMsgBoxSetForeground, "NVS_mail") = vbYes Then
             mDiscardRequested = True
         End If
     Else
         mCancelled = True
         mAction = "close"
-        Me.Hide
+        HideNow
     End If
+End Sub
+
+' The keyboard in the folder tree, the color swatches or a list's rows.
+Private Sub txtKeys_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Select Case mMode
+        Case MODE_FOLDER: TreeKey KeyCode, Shift
+        Case MODE_COLOR: ColorKey KeyCode, Shift
+        Case MODE_LIST: ListKey KeyCode, Shift
+    End Select
+End Sub
+
+Private Sub txtKeys_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
+    If mMode = MODE_FOLDER And KeyAscii >= 32 Then
+        ' Typing in the tree goes into Search.
+        txtFilter.SetFocus
+        txtFilter.Text = txtFilter.Text & Chr$(KeyAscii)
+        txtFilter.SelStart = Len(txtFilter.Text)
+    End If
+    KeyAscii = 0                            ' nothing is ever typed into this box
+End Sub
+
+Private Sub txtKeys_Enter()
+    If mMode = MODE_FOLDER Then SetTreeFocus True
+End Sub
+
+Private Sub lblHit_MouseDown(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    If mMode = MODE_FOLDER Then TreeMouseDown Button, X, Y
 End Sub
 
 '------------------------------------------------------------------------------
@@ -308,6 +302,16 @@ Private Function NewTextBox(ByVal host As Object, ByVal l As Single, ByVal t As 
     Set NewTextBox = c
 End Function
 
+' An invisible box that takes the keyboard for a tree, a grid or a list.
+' It sits outside its frame's visible area, so it's never seen.
+Private Function NewKeyCatcher(ByVal host As Object) As MSForms.TextBox
+    Dim c As MSForms.TextBox
+    Set c = NewTextBox(host, -40, 0, 20, 12)
+    c.TabKeyBehavior = False
+    c.EnterKeyBehavior = False
+    Set NewKeyCatcher = c
+End Function
+
 Private Function ContrastText(ByVal colour As Long) As Long
     Dim r As Long, g As Long, b As Long
     r = colour And &HFF&
@@ -318,10 +322,12 @@ End Function
 
 '==============================================================================
 ' Move Items window
-'   Every folder is shown open, in the order Outlook keeps them. Click an
-'   arrow (or press Left / Right) to close or reopen one; type in Search to
-'   find a folder anywhere; double-click or Enter = OK. The window can be
-'   resized and remembers its size.
+'   Every folder is shown open, in the order Outlook keeps them. From the
+'   Search box or the tree: Up / Down / Page Up / Page Down move, Right opens
+'   a folder (again: its first subfolder), Left closes it (again: its parent),
+'   Enter = OK. Type to search folders anywhere. Click an arrow to open or
+'   close a folder; double-click a folder = OK. The mouse wheel scrolls. The
+'   window can be resized, remembers its size and always fits the screen.
 '==============================================================================
 
 Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal hint As String, _
@@ -330,42 +336,49 @@ Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal 
 
     mMode = MODE_FOLDER
     Me.Caption = title
-    If hint = "" Then SizeForm 300, 232 Else SizeForm 300, 262
+    If hint = "" Then SizeForm 320, 280 Else SizeForm 320, 310
 
-    Set lblPrompt = NewLabel(Me, 6, 6, 214, 13, prompt)
+    Set lblPrompt = NewLabel(Me, 6, 6, 234, 13, prompt)
     Set lbl = NewLabel(Me, 6, 25, 38, 13, "Search:")
-    Set txtFilter = NewTextBox(Me, 44, 22, 176, 18)
-    Set lstFolders = Me.Controls.Add("Forms.ListBox.1")
-    With lstFolders
+    lbl.Accelerator = "S"
+    Set txtFilter = NewTextBox(Me, 44, 22, 196, 18)
+    Set fraTree = Me.Controls.Add("Forms.Frame.1")
+    With fraTree
         .Left = 6
         .Top = 44
-        .Width = 214
-        .Height = 182
-        .IntegralHeight = False
-        .MatchEntry = 2             ' none: typing goes to Search instead
-        .Font.Name = UI_FONT
-        .Font.Size = 9
+        .Width = 234
+        .Height = 230
+        .Caption = ""
+        .SpecialEffect = 2              ' sunken, like a list box
+        .BackColor = RGB(255, 255, 255)
     End With
-    Set btnOK = NewButton(Me, 226, 44, 68, 21, okCaption)
+    Set txtKeys = NewKeyCatcher(fraTree)
+    Set sbTree = fraTree.Controls.Add("Forms.ScrollBar.1")
+    sbTree.Orientation = 0              ' vertical
+    sbTree.TabStop = False
+    sbTree.Visible = False
+    Set lblHit = NewLabel(fraTree, 0, 0, 10, 10, "")
+
+    Set btnOK = NewButton(Me, 246, 44, 68, 21, okCaption)
     btnOK.Default = True
-    Set btnCancel = NewButton(Me, 226, 69, 68, 21, "Cancel")
+    Set btnCancel = NewButton(Me, 246, 69, 68, 21, "Cancel")
     btnCancel.Cancel = True
-    Set btnNew = NewButton(Me, 226, 94, 68, 21, "New...")
+    Set btnNew = NewButton(Me, 246, 94, 68, 21, "New...")
+    btnNew.Accelerator = "N"
     If hint <> "" Then
-        Set lblHint = NewLabel(Me, 6, 232, 288, 28, hint)
+        Set lblHint = NewLabel(Me, 6, 280, 308, 28, hint)
         lblHint.ForeColor = RGB(96, 96, 96)
         lblHint.Font.Size = 8
         lblHint.WordWrap = True
     End If
 
-    ' Reopen at the size you last left it.
+    ' Reopen at the size you last left it (made to fit the screen when shown).
     w = Val(GetSetting("NVS_mail", "Window", "MoveWidth", "0"))
     h = Val(GetSetting("NVS_mail", "Window", "MoveHeight", "0"))
     If w >= 240 And h >= 180 Then
         Me.Width = w
         Me.Height = h
     End If
-    LayoutFolders
 
     Set mStores = New Collection
     If Not defaultFolder Is Nothing Then
@@ -376,12 +389,14 @@ Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal 
     End If
     NVS_BuildFolderCache mStores, False
 
-    ' Every folder starts open, so subfolders show without expanding anything.
+    ' Every folder starts open, so subfolders show without opening anything.
     Set mExpanded = CreateObject("Scripting.Dictionary")
     For i = 0 To gNVS_FolderCount - 1
         If gNVS_FolderKids(i) > 0 Then mExpanded(gNVS_FolderID(i)) = True
     Next
     mSel = NVS_FolderCacheIndex(defID)
+    mTreeFocus = True
+    LayoutFolders
     RefreshFolders True
 
     Me.Show
@@ -390,19 +405,19 @@ Public Function PickFolder(ByVal title As String, ByVal prompt As String, ByVal 
     If Not mCancelled And mResult >= 0 Then Set PickFolder = NVS_FolderFromCache(mResult)
 End Function
 
-' Fits the controls to the window's current size.
+' Fits the controls to the window's size, and makes enough rows to fill it.
 Private Sub LayoutFolders()
-    Dim w As Single, h As Single, bx As Single, hintH As Single
-    If lstFolders Is Nothing Or btnNew Is Nothing Then Exit Sub
+    Dim w As Single, h As Single, bx As Single, hintH As Single, k As Long
+    If fraTree Is Nothing Or btnNew Is Nothing Then Exit Sub
     w = Me.InsideWidth
     h = Me.InsideHeight
-    If w < 200 Or h < 150 Then Exit Sub
+    If w < 200 Or h < 120 Then Exit Sub
     If Not lblHint Is Nothing Then hintH = 30
     bx = w - 74
     lblPrompt.Width = bx - 12
     txtFilter.Width = bx - 6 - txtFilter.Left
-    lstFolders.Width = bx - 12
-    lstFolders.Height = h - lstFolders.Top - 6 - hintH
+    fraTree.Width = bx - 12
+    fraTree.Height = h - fraTree.Top - 6 - hintH
     btnOK.Left = bx
     btnCancel.Left = bx
     btnNew.Left = bx
@@ -410,77 +425,267 @@ Private Sub LayoutFolders()
         lblHint.Top = h - hintH + 2
         lblHint.Width = w - 12
     End If
+
+    mSlots = Int((fraTree.InsideHeight - 2) / ROW_H)
+    If mSlots < 1 Then mSlots = 1
+    If mSlotsMade < mSlots Then
+        ReDim Preserve mRowBack(0 To mSlots - 1)
+        ReDim Preserve mRowArrow(0 To mSlots - 1)
+        ReDim Preserve mRowName(0 To mSlots - 1)
+        ReDim Preserve mRowPath(0 To mSlots - 1)
+        For k = mSlotsMade To mSlots - 1
+            Set mRowBack(k) = NewBlock(fraTree, 0, k * ROW_H + 1, 10, ROW_H, RGB(255, 255, 255))
+            Set mRowArrow(k) = NewLabel(fraTree, 0, k * ROW_H + 3, 12, ROW_H - 3, "")
+            mRowArrow(k).Font.Name = ICON_FONT
+            mRowArrow(k).Font.Size = 7
+            mRowArrow(k).ForeColor = RGB(96, 96, 96)
+            Set mRowName(k) = NewLabel(fraTree, 0, k * ROW_H + 1, 10, ROW_H - 1, "")
+            mRowName(k).WordWrap = False
+            Set mRowPath(k) = NewLabel(fraTree, 0, k * ROW_H + 1, 10, ROW_H - 1, "")
+            mRowPath(k).WordWrap = False
+            mRowPath(k).ForeColor = RGB(120, 120, 120)
+        Next
+        mSlotsMade = mSlots
+        lblHit.ZOrder 0                 ' the click area stays on top of the rows
+    End If
+    For k = mSlots To mSlotsMade - 1    ' rows that no longer fit
+        mRowBack(k).Visible = False
+        mRowArrow(k).Visible = False
+        mRowName(k).Visible = False
+        mRowPath(k).Visible = False
+    Next
+    sbTree.Top = 0
+    sbTree.Height = fraTree.InsideHeight
+    sbTree.Width = 12
+    sbTree.Left = fraTree.InsideWidth - sbTree.Width
+    lblHit.Top = 0
+    lblHit.Height = fraTree.InsideHeight
+    If mRowCount > 0 Then KeepSelVisible
+    PaintTree
 End Sub
 
-Private Function RowText(ByVal i As Long) As String
-    Dim g As String
-    If gNVS_FolderKids(i) > 0 Then
-        If mExpanded.Exists(gNVS_FolderID(i)) Then g = ChrW$(&H25BC) Else g = ChrW$(&H25BA)
-    Else
-        g = "   "
-    End If
-    RowText = Space$(gNVS_FolderDepth(i) * 4) & g & "  " & gNVS_FolderName(i)
+Private Function Searching() As Boolean
+    If Not txtFilter Is Nothing Then Searching = (Trim$(txtFilter.Text) <> "")
 End Function
 
-' Refills the list: the folder tree, or the folders matching Search.
+' Refills the rows: the folder tree, or the folders matching Search - best
+' matches first (name starts with what you typed, then a word in the name,
+' then anywhere in the path).
 Private Sub RefreshFolders(ByVal scrollToSel As Boolean)
-    Dim f As String, i As Long, n As Long, arr() As Variant, selRow As Long, topRow As Long, skipBelow As Long
+    Dim i As Long, n As Long, skipBelow As Long, words() As String, q As String
+    Dim b As Long, cnt(0 To 4) As Long, buck() As Long, nm As String, sc As Long
 
-    f = Trim$(txtFilter.Text)
-    ReDim arr(0 To gNVS_FolderCount)
+    q = LCase$(Trim$(txtFilter.Text))
     ReDim mRows(0 To gNVS_FolderCount)
-    skipBelow = -1
-    For i = 0 To gNVS_FolderCount - 1
-        If f = "" Then
+    If q = "" Then
+        skipBelow = -1
+        For i = 0 To gNVS_FolderCount - 1
             ' Folders are listed parent first, so everything deeper than a closed
             ' folder - up to the next folder at its level - is hidden.
             If skipBelow >= 0 Then
                 If gNVS_FolderDepth(i) > skipBelow Then GoTo NextFolder
                 skipBelow = -1
             End If
-            arr(n) = RowText(i)
             mRows(n) = i
             n = n + 1
             If gNVS_FolderKids(i) > 0 Then
                 If Not mExpanded.Exists(gNVS_FolderID(i)) Then skipBelow = gNVS_FolderDepth(i)
             End If
-        ElseIf InStr(1, gNVS_FolderPath(i), f, vbTextCompare) > 0 Then
-            arr(n) = gNVS_FolderPath(i)
-            mRows(n) = i
-            n = n + 1
-        End If
 NextFolder:
-    Next
-
-    topRow = lstFolders.TopIndex
-    mRowCount = n
-    mSelecting = True
-    If n = 0 Then
-        lstFolders.Clear
+        Next
     Else
-        ReDim Preserve arr(0 To n - 1)
-        lstFolders.List = arr
+        words = Split(q, " ")
+        ReDim buck(0 To 4, 0 To gNVS_FolderCount)
+        For i = 0 To gNVS_FolderCount - 1
+            sc = MatchScore(i, q, words)
+            If sc >= 0 Then
+                buck(sc, cnt(sc)) = i
+                cnt(sc) = cnt(sc) + 1
+            End If
+        Next
+        For b = 0 To 4
+            For i = 0 To cnt(b) - 1
+                mRows(n) = buck(b, i)
+                n = n + 1
+            Next
+        Next
     End If
+    mRowCount = n
 
-    selRow = -1
+    mSelRow = -1
     For i = 0 To n - 1
         If mRows(i) = mSel Then
-            selRow = i
+            mSelRow = i
             Exit For
         End If
     Next
-    If selRow < 0 And n > 0 And f <> "" Then
-        selRow = 0
+    If q <> "" And n > 0 Then
+        mSelRow = 0                     ' the best match
         mSel = mRows(0)
     End If
-    If selRow >= 0 Then lstFolders.ListIndex = selRow
-    mSelecting = False
+    If mTop > mRowCount - mSlots Then mTop = mRowCount - mSlots
+    If mTop < 0 Or q <> "" Then mTop = 0
+    If scrollToSel Then KeepSelVisible
+    PaintTree
+End Sub
 
+' -1 if folder i doesn't match the search; otherwise 0 (best) to 4.
+Private Function MatchScore(ByVal i As Long, ByVal q As String, words() As String) As Long
+    Dim path As String, nm As String, k As Long
+    path = LCase$(gNVS_FolderPath(i))
+    For k = LBound(words) To UBound(words)
+        If words(k) <> "" Then
+            If InStr(1, path, words(k), vbBinaryCompare) = 0 Then
+                MatchScore = -1
+                Exit Function
+            End If
+        End If
+    Next
+    nm = LCase$(gNVS_FolderName(i))
+    If Left$(nm, Len(q)) = q Then
+        MatchScore = 0
+    ElseIf Left$(nm, Len(words(0))) = words(0) Then
+        MatchScore = 1
+    ElseIf InStr(1, nm, q, vbBinaryCompare) > 0 Then
+        MatchScore = 2
+    ElseIf InStr(1, " " & Replace(Replace(nm, "-", " "), "_", " "), " " & words(0), vbBinaryCompare) > 0 Then
+        MatchScore = 3
+    Else
+        MatchScore = 4
+    End If
+End Function
+
+' Draws the rows on screen.
+Private Sub PaintTree()
+    Dim k As Long, r As Long, i As Long, x As Single, rowW As Single, srch As Boolean
+    Dim maxName As Single, back As Long
+    If mSlotsMade = 0 Or mPainting Then Exit Sub
+    mPainting = True
     On Error Resume Next
-    If scrollToSel And selRow >= 0 Then
-        If selRow > 5 Then lstFolders.TopIndex = selRow - 5 Else lstFolders.TopIndex = 0
-    ElseIf topRow >= 0 And topRow < n Then
-        lstFolders.TopIndex = topRow
+    srch = Searching()
+
+    sbTree.Visible = (mRowCount > mSlots)
+    If sbTree.Visible Then
+        sbTree.Min = 0
+        sbTree.Max = mRowCount - mSlots
+        sbTree.LargeChange = IIf(mSlots > 1, mSlots - 1, 1)
+        sbTree.SmallChange = 1
+        sbTree.Value = mTop
+        rowW = sbTree.Left
+    Else
+        rowW = fraTree.InsideWidth
+    End If
+    lblHit.Width = rowW
+
+    For k = 0 To mSlots - 1
+        r = mTop + k
+        If r < mRowCount Then
+            i = mRows(r)
+            If r = mSelRow Then
+                If mTreeFocus Then back = RGB(204, 232, 255) Else back = RGB(217, 217, 217)
+            ElseIf r = mHover Then
+                back = RGB(229, 243, 255)
+            Else
+                back = RGB(255, 255, 255)
+            End If
+            mRowBack(k).Width = rowW
+            mRowBack(k).BackColor = back
+            mRowBack(k).Visible = True
+            If srch Then
+                mRowArrow(k).Visible = False
+                x = 6
+                maxName = rowW - x - 40
+                mRowName(k).AutoSize = False
+                mRowName(k).Left = x
+                mRowName(k).Caption = gNVS_FolderName(i)
+                mRowName(k).AutoSize = True
+                If mRowName(k).Width > maxName Then
+                    mRowName(k).AutoSize = False
+                    mRowName(k).Width = maxName
+                End If
+                mRowName(k).Height = ROW_H - 1
+                mRowPath(k).Left = x + mRowName(k).Width + 6
+                mRowPath(k).Width = rowW - mRowPath(k).Left
+                mRowPath(k).Caption = ParentPath(i)
+                mRowPath(k).Visible = True
+            Else
+                x = 4 + gNVS_FolderDepth(i) * INDENT
+                If gNVS_FolderKids(i) > 0 Then
+                    If mExpanded.Exists(gNVS_FolderID(i)) Then
+                        mRowArrow(k).Caption = ChrW$(&HE70D)     ' chevron down: open
+                    Else
+                        mRowArrow(k).Caption = ChrW$(&HE76C)     ' chevron right: closed
+                    End If
+                    mRowArrow(k).Left = x
+                    mRowArrow(k).Visible = True
+                Else
+                    mRowArrow(k).Visible = False
+                End If
+                mRowName(k).AutoSize = False
+                mRowName(k).Left = x + 13
+                mRowName(k).Width = rowW - mRowName(k).Left
+                mRowName(k).Caption = gNVS_FolderName(i)
+                mRowPath(k).Visible = False
+            End If
+            mRowName(k).Font.Bold = (gNVS_FolderDepth(i) = 0)       ' mailbox names, as in Outlook
+            mRowName(k).Visible = True
+        Else
+            mRowBack(k).Visible = False
+            mRowArrow(k).Visible = False
+            mRowName(k).Visible = False
+            mRowPath(k).Visible = False
+        End If
+    Next
+    mPainting = False
+End Sub
+
+' "Inbox > Projects" for a search result: where the folder is.
+Private Function ParentPath(ByVal i As Long) As String
+    Dim p As String, k As Long
+    p = gNVS_FolderPath(i)
+    k = InStrRev(p, "\")
+    If k > 0 Then ParentPath = Replace(Left$(p, k - 1), "\", " > ")
+    k = InStr(p, "   [")                                    ' another mailbox
+    If k > 0 And InStr(ParentPath, "[") = 0 Then ParentPath = ParentPath & Mid$(p, k)
+End Function
+
+' Scrolls so the selected row is on screen.
+Private Sub KeepSelVisible()
+    If mSelRow < 0 Then Exit Sub
+    If mSelRow < mTop Then mTop = mSelRow
+    If mSelRow > mTop + mSlots - 1 Then mTop = mSelRow - mSlots + 1
+    If mTop > mRowCount - mSlots Then mTop = mRowCount - mSlots
+    If mTop < 0 Then mTop = 0
+End Sub
+
+Private Sub ScrollTree(ByVal delta As Long)
+    Dim t As Long
+    t = mTop + delta
+    If t > mRowCount - mSlots Then t = mRowCount - mSlots
+    If t < 0 Then t = 0
+    If t <> mTop Then
+        mTop = t
+        mHover = -1
+        PaintTree
+    End If
+End Sub
+
+Private Sub SelectRow(ByVal r As Long)
+    If mRowCount = 0 Then Exit Sub
+    If r < 0 Then r = 0
+    If r > mRowCount - 1 Then r = mRowCount - 1
+    mSelRow = r
+    mSel = mRows(r)
+    KeepSelVisible
+    PaintTree
+End Sub
+
+Private Sub MoveSel(ByVal delta As Long)
+    If mRowCount = 0 Then Exit Sub
+    If mSelRow < 0 Then
+        If delta > 0 Then SelectRow mTop Else SelectRow mTop + mSlots - 1
+    Else
+        SelectRow mSelRow + delta
     End If
 End Sub
 
@@ -492,105 +697,209 @@ Private Sub ToggleFolder(ByVal i As Long)
     RefreshFolders False
 End Sub
 
-Private Sub MoveSel(ByVal delta As Long)
-    Dim r As Long
-    If mRowCount = 0 Then Exit Sub
-    r = lstFolders.ListIndex + delta
-    If r < 0 Then r = 0
-    If r > mRowCount - 1 Then r = mRowCount - 1
-    lstFolders.ListIndex = r
+' Right: open the folder, or if it's open already go to its first subfolder.
+Private Sub OpenOrEnter()
+    If mSel < 0 Or Searching() Then Exit Sub
+    If gNVS_FolderKids(mSel) = 0 Then Exit Sub
+    If mExpanded.Exists(gNVS_FolderID(mSel)) Then
+        MoveSel 1
+    Else
+        ToggleFolder mSel
+    End If
+End Sub
+
+' Left: close the folder, or if it's closed (or has none) go to its parent.
+Private Sub CloseOrLeave()
+    Dim p As Long
+    If mSel < 0 Or Searching() Then Exit Sub
+    If gNVS_FolderKids(mSel) > 0 And mExpanded.Exists(gNVS_FolderID(mSel)) Then
+        ToggleFolder mSel
+    Else
+        p = gNVS_FolderParent(mSel)
+        If p >= 0 Then
+            mSel = p
+            RefreshFolders True
+        End If
+    End If
+End Sub
+
+' * : opens the folder and everything inside it.
+Private Sub OpenAllBelow()
+    Dim i As Long, d As Long
+    If mSel < 0 Or Searching() Then Exit Sub
+    d = gNVS_FolderDepth(mSel)
+    For i = mSel To gNVS_FolderCount - 1
+        If i > mSel And gNVS_FolderDepth(i) <= d Then Exit For
+        If gNVS_FolderKids(i) > 0 Then mExpanded(gNVS_FolderID(i)) = True
+    Next
+    RefreshFolders True
 End Sub
 
 Private Sub ChooseFolder()
-    If mSel < 0 Then
+    If mSel < 0 Or mSelRow < 0 Then
         Beep
         Exit Sub
     End If
     mResult = mSel
     mCancelled = False
-    Me.Hide
+    HideNow
+End Sub
+
+Private Sub SetTreeFocus(ByVal onIt As Boolean)
+    If mTreeFocus = onIt Then Exit Sub
+    mTreeFocus = onIt
+    PaintTree
 End Sub
 
 Private Sub txtFilter_Change()
+    Dim i As Long
+    If Trim$(txtFilter.Text) = "" And mSel >= 0 Then
+        ' Back to the tree: open the folders above the one picked in Search.
+        i = gNVS_FolderParent(mSel)
+        Do While i >= 0
+            If gNVS_FolderKids(i) > 0 Then mExpanded(gNVS_FolderID(i)) = True
+            i = gNVS_FolderParent(i)
+        Loop
+    End If
     RefreshFolders True
+End Sub
+
+Private Sub txtFilter_Enter()
+    SetTreeFocus True
+End Sub
+
+Private Sub txtFilter_Exit(ByVal Cancel As MSForms.ReturnBoolean)
+    SetTreeFocus False
 End Sub
 
 Private Sub txtFilter_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
     Select Case KeyCode
-        Case vbKeyReturn: KeyCode = 0: ChooseFolder
-        Case vbKeyDown: KeyCode = 0: MoveSel 1
-        Case vbKeyUp: KeyCode = 0: MoveSel -1
-        Case vbKeyPageDown: KeyCode = 0: MoveSel 10
-        Case vbKeyPageUp: KeyCode = 0: MoveSel -10
-    End Select
-End Sub
-
-Private Sub lstFolders_Change()
-    If mSelecting Then Exit Sub
-    If lstFolders.ListIndex >= 0 And lstFolders.ListIndex < mRowCount Then mSel = mRows(lstFolders.ListIndex)
-End Sub
-
-' A click on the arrow opens or closes the folder.
-Private Sub lstFolders_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    Dim r As Long, i As Long
-    mArrowClick = False
-    If mSkipUp Then
-        mSkipUp = False
-        Exit Sub
-    End If
-    If Button <> 1 Or Trim$(txtFilter.Text) <> "" Then Exit Sub
-    r = lstFolders.ListIndex
-    If r < 0 Or r >= mRowCount Then Exit Sub
-    i = mRows(r)
-    mSel = i
-    If gNVS_FolderKids(i) = 0 Then Exit Sub
-    If X <= 6 + gNVS_FolderDepth(i) * 9.5 + 12 Then
-        mArrowClick = True
-        ToggleFolder i
-    End If
-End Sub
-
-Private Sub lstFolders_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
-    If mArrowClick Then
-        mSkipUp = True              ' a double-click on the arrow just opens/closes
-        Exit Sub
-    End If
-    ChooseFolder
-End Sub
-
-Private Sub lstFolders_KeyDown(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
-    Dim searching As Boolean
-    searching = (Trim$(txtFilter.Text) <> "")
-    Select Case KeyCode
         Case vbKeyReturn
             KeyCode = 0
             ChooseFolder
-        Case vbKeyRight, vbKeyAdd
-            If Not searching And mSel >= 0 Then
-                KeyCode = 0
-                If gNVS_FolderKids(mSel) > 0 And Not mExpanded.Exists(gNVS_FolderID(mSel)) Then ToggleFolder mSel
+        Case vbKeyDown, vbKeyUp, vbKeyPageDown, vbKeyPageUp
+            TreeKey KeyCode, Shift
+        Case vbKeyHome, vbKeyEnd
+            If Shift = 2 Or txtFilter.Text = "" Then TreeKey KeyCode, 0      ' Ctrl+Home / Ctrl+End
+        Case vbKeyRight, vbKeyLeft
+            If txtFilter.Text = "" Then TreeKey KeyCode, Shift                ' nothing to move the cursor in
+    End Select
+End Sub
+
+' Keys for the tree, from the tree itself or from the Search box.
+Private Sub TreeKey(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Select Case KeyCode
+        Case vbKeyDown: KeyCode = 0: MoveSel 1
+        Case vbKeyUp: KeyCode = 0: MoveSel -1
+        Case vbKeyPageDown: KeyCode = 0: MoveSel IIf(mSlots > 1, mSlots - 1, 1)
+        Case vbKeyPageUp: KeyCode = 0: MoveSel -IIf(mSlots > 1, mSlots - 1, 1)
+        Case vbKeyHome: KeyCode = 0: SelectRow 0
+        Case vbKeyEnd: KeyCode = 0: SelectRow mRowCount - 1
+        Case vbKeyRight, vbKeyAdd: KeyCode = 0: OpenOrEnter
+        Case vbKeyLeft, vbKeySubtract: KeyCode = 0: CloseOrLeave
+        Case vbKeyMultiply: KeyCode = 0: OpenAllBelow
+        Case vbKeyBack
+            KeyCode = 0
+            If Searching() Then
+                txtFilter.SetFocus
+                txtFilter.Text = Left$(txtFilter.Text, Len(txtFilter.Text) - 1)
+            Else
+                CloseOrLeave
             End If
-        Case vbKeyLeft, vbKeySubtract
-            If Not searching And mSel >= 0 Then
+        Case vbKeyReturn: KeyCode = 0: ChooseFolder
+        Case vbKeyInsert: KeyCode = 0: btnNew_Click
+        Case vbKeyN
+            If Shift = 2 Then                ' Ctrl+N: new folder
                 KeyCode = 0
-                If gNVS_FolderKids(mSel) > 0 And mExpanded.Exists(gNVS_FolderID(mSel)) Then
-                    ToggleFolder mSel
-                ElseIf gNVS_FolderParent(mSel) >= 0 Then
-                    mSel = gNVS_FolderParent(mSel)
-                    RefreshFolders True
-                End If
+                btnNew_Click
             End If
     End Select
 End Sub
 
-' Typing while the list has focus goes into Search.
-Private Sub lstFolders_KeyPress(ByVal KeyAscii As MSForms.ReturnInteger)
-    If KeyAscii >= 32 Then
-        txtFilter.SetFocus
-        txtFilter.Text = txtFilter.Text & Chr$(KeyAscii)
-        txtFilter.SelStart = Len(txtFilter.Text)
-        KeyAscii = 0
+Private Sub TreeMouseDown(ByVal Button As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim r As Long, i As Long, ax As Single
+    mArrowDown = False
+    r = mTop + Int(Y / ROW_H)
+    If r < 0 Or r >= mRowCount Then Exit Sub
+    i = mRows(r)
+    If Button = 1 And Not Searching() And gNVS_FolderKids(i) > 0 Then
+        ax = 4 + gNVS_FolderDepth(i) * INDENT
+        If X >= ax - 4 And X <= ax + 13 Then         ' on the arrow
+            mArrowDown = True
+            mSel = i
+            ToggleFolder i
+            txtKeys.SetFocus
+            Exit Sub
+        End If
     End If
+    mSelRow = r
+    mSel = i
+    txtKeys.SetFocus
+    mTreeFocus = True
+    PaintTree
+End Sub
+
+Private Sub lblHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Dim r As Long, i As Long
+    Select Case mMode
+        Case MODE_FOLDER
+            r = mTop + Int(Y / ROW_H)
+            If r >= mRowCount Then r = -1
+            If r <> mHover Then
+                mHover = r
+                PaintTree
+            End If
+        Case MODE_COLOR
+            i = SwatchAt(X, Y)
+            If i > 0 Then lblHint.Caption = NVS_ColorName(i)
+    End Select
+End Sub
+
+Private Sub lblHit_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
+    Select Case mMode
+        Case MODE_FOLDER
+            If Not mArrowDown Then ChooseFolder          ' a double-click on the arrow just opens/closes
+        Case MODE_COLOR
+            If mColor >= 1 Then
+                mCancelled = False
+                HideNow
+            End If
+        Case MODE_LIST
+            If mListSel >= 1 Then
+                mAction = "change"
+                HideNow
+            End If
+    End Select
+End Sub
+
+Private Sub sbTree_Change()
+    If mPainting Then Exit Sub
+    If sbTree.Value <> mTop Then
+        mTop = sbTree.Value
+        PaintTree
+    End If
+End Sub
+
+Private Sub sbTree_Scroll()
+    sbTree_Change
+End Sub
+
+Private Sub fraTree_Exit(ByVal Cancel As MSForms.ReturnBoolean)
+    ' Focus went to the buttons: show the selection the way an inactive list does.
+    If Not Me.ActiveControl Is txtFilter Then SetTreeFocus False
+End Sub
+
+' Pointer off the rows: no row is lit up.
+Private Sub UserForm_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
+    Select Case mMode
+        Case MODE_FOLDER
+            If mHover <> -1 Then
+                mHover = -1
+                PaintTree
+            End If
+        Case MODE_COLOR
+            If mColor >= 1 Then lblHint.Caption = NVS_ColorName(mColor) Else lblHint.Caption = "Click a color"
+    End Select
 End Sub
 
 ' New... creates a folder inside the selected one, like Outlook's Move Items.
@@ -608,7 +917,7 @@ Private Sub btnNew_Click()
     On Error Resume Next
     Set nf = parentF.Folders.Add(nm)
     If nf Is Nothing Then
-        MsgBox "Couldn't create the folder: " & Err.Description, vbExclamation, "Create New Folder"
+        MsgBox "Couldn't create the folder: " & Err.Description, vbExclamation + vbMsgBoxSetForeground, "Create New Folder"
         Exit Sub
     End If
     newID = nf.EntryID
@@ -619,10 +928,12 @@ Private Sub btnNew_Click()
     mSel = NVS_FolderCacheIndex(newID)
     txtFilter.Text = ""
     RefreshFolders True
+    txtKeys.SetFocus
 End Sub
 
 '==============================================================================
 ' Folder Color window - pick a swatch, name the category
+'   Arrow keys move between the colors, Enter = OK, Tab goes to the name.
 '==============================================================================
 
 ' Returns the chosen color (1-25), or -1 if cancelled. Read CategoryName
@@ -645,6 +956,7 @@ Public Function PickColor(ByVal title As String, ByVal folderName As String, ByV
         mSw(i).BorderColor = RGB(255, 255, 255)
     Next
     Set lblHit = NewLabel(Me, GRID_X, GRID_Y, 5 * CELL, 5 * CELL, "")
+    Set txtKeys = NewKeyCatcher(Me)         ' the arrow keys pick a swatch
 
     Set lblHint = NewLabel(Me, 8, 178, 228, 13, "")
     lblHint.TextAlign = 2               ' centered
@@ -678,7 +990,7 @@ Private Sub SelectSwatch(ByVal i As Long)
         lblPreview.ForeColor = ContrastText(NVS_SwatchColor(i))
     Else
         lblSel.Visible = False
-        lblHint.Caption = "Click a color"
+        lblHint.Caption = "Click a color, or use the arrow keys"
         lblPreview.BackColor = RGB(240, 240, 240)
         lblPreview.ForeColor = RGB(96, 96, 96)
     End If
@@ -702,11 +1014,29 @@ Private Function SwatchAt(ByVal X As Single, ByVal Y As Single) As Long
     SwatchAt = r * 5 + c + 1
 End Function
 
-Private Sub lblHit_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    Dim i As Long
-    If mMode <> MODE_COLOR Then Exit Sub
-    i = SwatchAt(X, Y)
-    If i > 0 Then lblHint.Caption = NVS_ColorName(i)
+' Arrow keys move around the 5 x 5 colors; Enter = OK.
+Private Sub ColorKey(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Dim i As Long, r As Long, c As Long
+    i = mColor
+    If i < 1 Then i = 1
+    r = (i - 1) \ 5
+    c = (i - 1) Mod 5
+    Select Case KeyCode
+        Case vbKeyLeft: If c > 0 Then c = c - 1
+        Case vbKeyRight: If c < 4 Then c = c + 1
+        Case vbKeyUp: If r > 0 Then r = r - 1
+        Case vbKeyDown: If r < 4 Then r = r + 1
+        Case vbKeyHome: r = 0: c = 0
+        Case vbKeyEnd: r = 4: c = 4
+        Case vbKeyReturn
+            KeyCode = 0
+            btnOK_Click
+            Exit Sub
+        Case Else
+            Exit Sub
+    End Select
+    KeyCode = 0
+    SelectSwatch r * 5 + c + 1
 End Sub
 
 Private Sub lblHit_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
@@ -715,35 +1045,17 @@ Private Sub lblHit_MouseUp(ByVal Button As Integer, ByVal Shift As Integer, ByVa
         Case MODE_COLOR
             i = SwatchAt(X, Y)
             If i > 0 Then SelectSwatch i
+            txtKeys.SetFocus
         Case MODE_LIST
             r = Int(Y / mRowH) + 1
             If r >= 1 And r <= mListN Then SelectListRow r
+            txtKeys.SetFocus
     End Select
-End Sub
-
-Private Sub lblHit_DblClick(ByVal Cancel As MSForms.ReturnBoolean)
-    Select Case mMode
-        Case MODE_COLOR
-            If mColor >= 1 Then
-                mCancelled = False
-                Me.Hide
-            End If
-        Case MODE_LIST
-            If mListSel >= 1 Then
-                mAction = "change"
-                Me.Hide
-            End If
-    End Select
-End Sub
-
-' Pointer left the swatches: show the selected color's name again.
-Private Sub UserForm_MouseMove(ByVal Button As Integer, ByVal Shift As Integer, ByVal X As Single, ByVal Y As Single)
-    If mMode <> MODE_COLOR Then Exit Sub
-    If mColor >= 1 Then lblHint.Caption = NVS_ColorName(mColor) Else lblHint.Caption = "Click a color"
 End Sub
 
 '==============================================================================
 ' List window (Folder Colors, Save Locations): rows with Add / Change / Remove
+'   Up / Down pick a row, Enter = Change, Delete = Remove, Insert = Add.
 '==============================================================================
 
 ' Returns "add", "change", "remove" or "close". SelectedRow says which row.
@@ -771,6 +1083,7 @@ Public Function ShowList(ByVal title As String, ByVal prompt As String, ByVal n 
         .SpecialEffect = 2              ' sunken, like a list box
         .BackColor = RGB(255, 255, 255)
     End With
+    Set txtKeys = NewKeyCatcher(fraRows)    ' Up / Down / Enter / Delete / Insert
 
     Set lblSel = NewBlock(fraRows, 0, 0, 316, mRowH, RGB(204, 232, 255))
     lblSel.Visible = False
@@ -799,8 +1112,16 @@ Public Function ShowList(ByVal title As String, ByVal prompt As String, ByVal n 
     Set lblHit = NewLabel(fraRows, 0, 0, 316, IIf(n > 0, n * mRowH, 1), "")
 
     Set btnAdd = NewButton(Me, 336, 34, 76, 22, "Add...")
+    btnAdd.Accelerator = "A"
     Set btnChange = NewButton(Me, 336, 60, 76, 22, "Change...")
+    btnChange.Accelerator = "C"
     Set btnRemove = NewButton(Me, 336, 86, 76, 22, "Remove")
+    btnRemove.Accelerator = "R"
+    Set lblHint = NewLabel(Me, 336, 118, 78, 120, "Up / Down: pick" & vbCrLf & "Enter: Change" & vbCrLf & _
+                           "Delete: Remove" & vbCrLf & "Insert: Add" & vbCrLf & "Esc: Close")
+    lblHint.WordWrap = True
+    lblHint.Font.Size = 8
+    lblHint.ForeColor = RGB(120, 120, 120)
     Set btnCancel = NewButton(Me, 336, 262, 76, 22, "Close")
     btnCancel.Cancel = True
     If n > 0 Then SelectListRow 1 Else UpdateListButtons
@@ -814,10 +1135,48 @@ Public Property Get SelectedRow() As Long
 End Property
 
 Private Sub SelectListRow(ByVal r As Long)
+    Dim rowTop As Single
+    If r < 1 Or r > mListN Then Exit Sub
     mListSel = r
     lblSel.Top = (r - 1) * mRowH
     lblSel.Visible = True
+    ' Scroll so the row is on screen.
+    If fraRows.ScrollBars = 2 Then
+        rowTop = (r - 1) * mRowH
+        If rowTop < fraRows.ScrollTop Then fraRows.ScrollTop = rowTop
+        If rowTop + mRowH > fraRows.ScrollTop + fraRows.InsideHeight Then
+            fraRows.ScrollTop = rowTop + mRowH - fraRows.InsideHeight
+        End If
+    End If
     UpdateListButtons
+End Sub
+
+Private Sub ScrollListBy(ByVal delta As Single)
+    Dim t As Single
+    If fraRows.ScrollBars <> 2 Then Exit Sub
+    t = fraRows.ScrollTop + delta
+    If t > fraRows.ScrollHeight - fraRows.InsideHeight Then t = fraRows.ScrollHeight - fraRows.InsideHeight
+    If t < 0 Then t = 0
+    fraRows.ScrollTop = t
+End Sub
+
+Private Sub ListKey(ByVal KeyCode As MSForms.ReturnInteger, ByVal Shift As Integer)
+    Dim page As Long
+    page = Int(fraRows.InsideHeight / mRowH) - 1
+    If page < 1 Then page = 1
+    Select Case KeyCode
+        Case vbKeyDown: SelectListRow mListSel + 1
+        Case vbKeyUp: SelectListRow mListSel - 1
+        Case vbKeyPageDown: SelectListRow IIf(mListSel + page > mListN, mListN, mListSel + page)
+        Case vbKeyPageUp: SelectListRow IIf(mListSel - page < 1, 1, mListSel - page)
+        Case vbKeyHome: SelectListRow 1
+        Case vbKeyEnd: SelectListRow mListN
+        Case vbKeyReturn: btnChange_Click
+        Case vbKeyDelete: btnRemove_Click
+        Case vbKeyInsert: btnAdd_Click
+        Case Else: Exit Sub
+    End Select
+    KeyCode = 0
 End Sub
 
 Private Sub UpdateListButtons()
@@ -827,19 +1186,19 @@ End Sub
 
 Private Sub btnAdd_Click()
     mAction = "add"
-    Me.Hide
+    HideNow
 End Sub
 
 Private Sub btnChange_Click()
     If mListSel < 1 Then Exit Sub
     mAction = "change"
-    Me.Hide
+    HideNow
 End Sub
 
 Private Sub btnRemove_Click()
     If mListSel < 1 Then Exit Sub
     mAction = "remove"
-    Me.Hide
+    HideNow
 End Sub
 
 '==============================================================================

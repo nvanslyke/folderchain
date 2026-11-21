@@ -6,9 +6,9 @@
 ' If ThisOutlookSession already has code of your own, see "If
 ' ThisOutlookSession already has code" in README.md.
 '
-' Outlook only sends its events (Outlook starting, new mail arriving, an email
-' being moved) to ThisOutlookSession, so this part can't go in the NVS_mail
-' module. Each event just hands over to NVS_mail, which colors the chain.
+' Outlook only sends its events (Outlook starting and closing, new mail
+' arriving, an email being moved) to ThisOutlookSession, so this part can't
+' go in the NVS_mail module. Each event just hands over to NVS_mail.
 '==============================================================================
 Option Explicit
 
@@ -29,6 +29,11 @@ End Sub
 Private Sub Application_NewMailEx(ByVal EntryIDCollection As String)
     NvsHookExplorer
     NVS_OnNewMail EntryIDCollection
+End Sub
+
+' Outlook is closing: stop NVS_mail's timers and its mouse-wheel hook.
+Private Sub Application_Quit()
+    NVS_Shutdown
 End Sub
 
 ' Follow the main Outlook window, so moves out of whichever folder you're
